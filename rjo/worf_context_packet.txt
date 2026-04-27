@@ -1,0 +1,3709 @@
+﻿=== Worf Global Model Summary ===
+Total Scripts: 275
+MonoBehaviours: 205
+Update/FixedUpdate: 89
+Coroutines: 19
+Approx Lines: 23176
+RTMG Scripts: 1
+Binder Scripts: 1
+Directional Scripts: 11
+PerfScore: 25347
+
+=== HOT BATCH ===
+Script: RuntimeTerrainMeshGenerator.cs
+  Classes: RuntimeTerrainMeshGenerator
+  Mono: True  Update: False  Fixed: False  Coroutine: True
+  RTMG: True  Binder: False  Directional: True
+
+Script: RuntimeTerrainMeshSilhouetteBinder.cs
+  Classes: RuntimeTerrainMeshSilhouetteBinder
+  Mono: True  Update: False  Fixed: False  Coroutine: False
+  RTMG: False  Binder: True  Directional: False
+
+Script: BorgTesseractHull.cs
+  Classes: BorgTesseractHull
+  Mono: True  Update: True  Fixed: False  Coroutine: False
+  RTMG: False  Binder: False  Directional: True
+
+Script: BorgCubeRuntime.cs
+  Classes: BorgCubeRuntime
+  Mono: True  Update: True  Fixed: False  Coroutine: False
+  RTMG: False  Binder: False  Directional: True
+
+Script: BorgCubeDebugger.cs
+  Classes: BorgCubeDebugger
+  Mono: True  Update: True  Fixed: False  Coroutine: False
+  RTMG: False  Binder: False  Directional: True
+
+Script: AutoWireRJOMesh.cs
+  Classes: AutoWireRJOMesh
+  Mono: True  Update: False  Fixed: False  Coroutine: False
+  RTMG: False  Binder: False  Directional: True
+
+Script: RJO3x3.cs
+  Classes: RJO3x3
+  Mono: True  Update: False  Fixed: False  Coroutine: False
+  RTMG: False  Binder: False  Directional: True
+
+Script: MeshGen_VertexAuthority.cs
+  Classes: MeshGen_VertexAuthority
+  Mono: True  Update: False  Fixed: False  Coroutine: False
+  RTMG: False  Binder: False  Directional: True
+
+Script: CVatGPTPrefabManager.cs
+  Classes: CVatGPTPrefabManager
+  Mono: True  Update: False  Fixed: False  Coroutine: False
+  RTMG: False  Binder: False  Directional: True
+
+Script: iIix3AutoWirer.cs
+  Classes: iIix3AutoWirer
+  Mono: True  Update: False  Fixed: False  Coroutine: False
+  RTMG: False  Binder: False  Directional: True
+
+Script: WorldPipeline_Bootstrap.cs
+  Classes: WorldPipeline_Bootstrap
+  Mono: True  Update: False  Fixed: False  Coroutine: True
+  RTMG: False  Binder: False  Directional: True
+
+Script: RJOAutoWire.cs
+  Classes: RJOAutoWire
+  Mono: True  Update: False  Fixed: False  Coroutine: False
+  RTMG: False  Binder: False  Directional: True
+
+===== BEGIN: RuntimeTerrainMeshGenerator.cs =====
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+
+[ExecuteAlways]
+[RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
+public class RuntimeTerrainMeshGenerator : MonoBehaviour
+{
+    [Header("Mesh Target and Material")]
+    public GameObject meshTarget;
+    public Material meshMaterial;
+
+    [Header("Editing Control")]
+    public GameObject editingToggleObject;
+
+    [Header("Mesh Settings")]
+    [Tooltip("Vertices per side (2, 3, 4, 5, ... up to 1024)")]
+    public int vertexResolution = 2;
+    public float updateInterval = 3f;
+
+    [Tooltip("When enabled, changing vertexResolution will clear and rebuild the grid from scratch.")]
+    public bool resetGridOnResolutionChange = true;
+
+    [Header("Core Prefabs (floor grid)")]
+    public GameObject vertexPrefab;
+    public GameObject insiderPrefab;
+    public GameObject outsiderPrefab;
+
+    [Header("Directional Prefabs (cube faces)")]
+    public GameObject NVertex;
+    public GameObject NInsider;
+    public GameObject NOutsider;
+
+    public GameObject SVertex;
+    public GameObject SInsider;
+    public GameObject SOutsider;
+
+    public GameObject EVertex;
+    public GameObject EInsider;
+    public GameObject EOutsider;
+
+    public GameObject WVertex;
+    public GameObject WInsider;
+    public GameObject WOutsider;
+
+    [Tooltip("Top vertex/insider/outsider (Skysider/Topsider/Toptex)")]
+    public GameObject Toptex;      // top vertex
+    public GameObject Topsider;    // top insider
+    public GameObject Skysider;    // top outsider (to sky)
+
+    [Header("Vertex Folders (auto-filled)")]
+    public Transform[] vertexFolders;
+
+    [Header("Vertex Controllers (auto-filled)")]
+    public GameObject[] vertexControllers;
+
+    [System.Serializable]
+    public class InsiderLink
+    {
+        public Transform vertexA;
+        public Transform vertexB;
+        public Transform insiderObject;
+    }
+
+    [System.Serializable]
+    public class OutsiderLink
+    {
+        public Transform vertexA;
+        public Transform vertexB;
+        public Transform outsiderObject;
+    }
+
+    [Header("Watertight Settings")]
+    public bool maintainWatertightInsiders = true;
+    public bool maintainWatertightOutsiders = true;
+    [Tooltip("Minimum thickness for insiders/outsiders (belly / column thickness).")]
+    public float thickness = 1f;
+
+    public InsiderLink[] insiders;
+    public OutsiderLink[] outsiders;
+
+    [Header("Subdivision Controls")]
+    public bool increaseSubdivision;
+    public bool decreaseSubdivision;
+
+    [Header("Mesh Orientation")]
+    public bool flipWindingZ = false;
+
+    [Header("Hull Cube Mode")]
+    [Tooltip("When disabled, behaves as 2D hull (outsiders at -0.5y). When enabled, outsiders hull full 3D vertical span.")]
+    public bool enableHullCube = false;
+
+    [Tooltip("Optional explicit root for the hull cube. If null, it will be created under meshTarget.")]
+    public Transform hullCubeRoot;
+
+    private const string HULL_ROOT_NAME = "HullCube";
+    private const string FACE_NORTH = "North";
+    private const string FACE_EAST  = "East";
+    private const string FACE_SOUTH = "South";
+    private const string FACE_WEST  = "West";
+    private const string FACE_TOP   = "Top";
+
+    private class HullFace
+    {
+        public Transform root;
+        public Transform vertexFolder;
+        public Transform insiderFolder;
+        public Transform outsiderFolder;
+
+        public GameObject[] vertices;
+        public GameObject[] insiders;
+        public GameObject[] outsiders;
+
+        public Vector3 faceNormal;
+        public Vector3 faceOffset;
+        public Quaternion faceRotation;
+
+        public GameObject vertexPrefab;
+        public GameObject insiderPrefab;
+        public GameObject outsiderPrefab;
+    }
+
+    private Dictionary<string, HullFace> hullFaces = new Dictionary<string, HullFace>();
+
+    private MeshFilter meshFilter;
+    private MeshRenderer meshRenderer;
+    private Mesh mesh;
+    private Coroutine updateRoutine;
+    private Vector3[] cachedVertices;
+
+    // resolution -> local positions (grid anchored at 0,0, growing +X,+Z)
+    private Dictionary<int, Vector3[]> levelPositionCache = new Dictionary<int, Vector3[]>();
+    private int lastResolution = -1;
+
+    public MeshFilter MeshFilter => meshFilter;
+    public MeshRenderer MeshRenderer => meshRenderer;
+
+    void OnEnable()
+    {
+        Init();
+        AutoWireOrGenerate();
+        GenerateMesh();
+
+        if (Application.isPlaying)
+            updateRoutine = StartCoroutine(UpdateMeshRoutine());
+#if UNITY_EDITOR
+        else
+            EditorApplication.update += EditorMeshUpdate;
+#endif
+    }
+
+    void OnDisable()
+    {
+        if (updateRoutine != null)
+            StopCoroutine(updateRoutine);
+#if UNITY_EDITOR
+        EditorApplication.update -= EditorMeshUpdate;
+#endif
+    }
+
+    void Init()
+    {
+        if (meshTarget == null)
+            meshTarget = gameObject;
+
+        meshFilter = meshTarget.GetComponent<MeshFilter>();
+        if (!meshFilter) meshFilter = meshTarget.AddComponent<MeshFilter>();
+
+        meshRenderer = meshTarget.GetComponent<MeshRenderer>();
+        if (!meshRenderer) meshRenderer = meshTarget.AddComponent<MeshRenderer>();
+
+        if (meshMaterial)
+            meshRenderer.sharedMaterial = meshMaterial;
+
+        if (mesh == null)
+            mesh = new Mesh { name = "GeneratedTerrainMesh" };
+
+        meshFilter.sharedMesh = mesh;
+
+        int res = Mathf.Clamp(vertexResolution, 2, 1024);
+        vertexResolution = res;
+        int count = res * res;
+
+        if (cachedVertices == null || cachedVertices.Length != count)
+            cachedVertices = new Vector3[count];
+
+        EnsureHullCubeRoot();
+    }
+
+    void EnsureHullCubeRoot()
+    {
+        if (!meshTarget) return;
+
+        if (hullCubeRoot == null)
+        {
+            Transform existing = meshTarget.transform.Find(HULL_ROOT_NAME);
+            if (existing != null)
+            {
+                hullCubeRoot = existing;
+            }
+            else
+            {
+                GameObject rootObj = new GameObject(HULL_ROOT_NAME);
+                rootObj.transform.SetParent(meshTarget.transform, false);
+                rootObj.transform.localPosition = Vector3.zero;
+                rootObj.transform.localRotation = Quaternion.identity;
+                rootObj.transform.localScale = Vector3.one;
+                hullCubeRoot = rootObj.transform;
+            }
+        }
+
+        hullCubeRoot.gameObject.SetActive(enableHullCube);
+        if (enableHullCube)
+            InitHullFaces();
+    }
+
+    void InitHullFaces()
+    {
+        hullFaces.Clear();
+
+        CreateHullFace(FACE_NORTH, Vector3.forward,  new Vector3(0f, 0f, 0.5f), Quaternion.identity,      NVertex, NInsider, NOutsider);
+        CreateHullFace(FACE_SOUTH, Vector3.back,     new Vector3(0f, 0f, -0.5f), Quaternion.Euler(0f, 180f, 0f), SVertex, SInsider, SOutsider);
+        CreateHullFace(FACE_EAST,  Vector3.right,    new Vector3(0.5f, 0f, 0f),  Quaternion.Euler(0f, 90f, 0f),  EVertex, EInsider, EOutsider);
+        CreateHullFace(FACE_WEST,  Vector3.left,     new Vector3(-0.5f, 0f, 0f), Quaternion.Euler(0f, -90f, 0f), WVertex, WInsider, WOutsider);
+        CreateHullFace(FACE_TOP,   Vector3.up,       new Vector3(0f, 0.5f, 0f),  Quaternion.Euler(-90f, 0f, 0f), Toptex, Topsider, Skysider);
+    }
+
+    void CreateHullFace(string name, Vector3 normal, Vector3 offset, Quaternion rotation,
+                        GameObject vPrefab, GameObject iPrefab, GameObject oPrefab)
+    {
+        Transform faceRoot = hullCubeRoot.Find(name);
+        if (faceRoot == null)
+        {
+            GameObject faceObj = new GameObject(name);
+            faceObj.transform.SetParent(hullCubeRoot, false);
+            faceRoot = faceObj.transform;
+        }
+
+        faceRoot.localPosition = offset;
+        faceRoot.localRotation = rotation;
+        faceRoot.localScale = Vector3.one;
+
+        Transform vFolder = faceRoot.Find("Vertexes");
+        if (vFolder == null)
+        {
+            GameObject vf = new GameObject("Vertexes");
+            vf.transform.SetParent(faceRoot, false);
+            vFolder = vf.transform;
+        }
+
+        Transform iFolder = faceRoot.Find("Insiders");
+        if (iFolder == null)
+        {
+            GameObject inf = new GameObject("Insiders");
+            inf.transform.SetParent(faceRoot, false);
+            iFolder = inf.transform;
+        }
+
+        Transform oFolder = faceRoot.Find("Outsiders");
+        if (oFolder == null)
+        {
+            GameObject outf = new GameObject("Outsiders");
+            outf.transform.SetParent(faceRoot, false);
+            oFolder = outf.transform;
+        }
+
+        HullFace face = new HullFace
+        {
+            root = faceRoot,
+            vertexFolder = vFolder,
+            insiderFolder = iFolder,
+            outsiderFolder = oFolder,
+            faceNormal = normal,
+            faceOffset = offset,
+            faceRotation = rotation,
+            vertexPrefab = vPrefab != null ? vPrefab : vertexPrefab,
+            insiderPrefab = iPrefab != null ? iPrefab : insiderPrefab,
+            outsiderPrefab = oPrefab != null ? oPrefab : outsiderPrefab
+        };
+
+        hullFaces[name] = face;
+    }
+
+    void AutoWireOrGenerate()
+    {
+        int res = Mathf.Clamp(vertexResolution, 2, 1024);
+
+        if (vertexControllers != null && vertexControllers.Length == res * res)
+            return;
+
+        AutoPopulateVertices();
+
+        if (vertexControllers != null && vertexControllers.Length == res * res)
+            return;
+
+        GenerateInitialGrid(res);
+    }
+
+    void GenerateInitialGrid(int res)
+    {
+        if (!vertexPrefab || !insiderPrefab || !outsiderPrefab)
+        {
+            Debug.LogError("[RTMG] Assign vertex/insider/outsider prefabs to generate grid.", this);
+            return;
+        }
+
+        Transform vertexFolder   = GetOrCreateChild(meshTarget.transform, "Vertexes");
+        Transform insiderFolder  = GetOrCreateChild(meshTarget.transform, "Insiders");
+        Transform outsiderFolder = GetOrCreateChild(meshTarget.transform, "Outsiders");
+
+        vertexFolders = new Transform[] { vertexFolder };
+
+        ClearChildren(vertexFolder);
+        ClearChildren(insiderFolder);
+        ClearChildren(outsiderFolder);
+
+        int count = res * res;
+        vertexControllers = new GameObject[count];
+
+        // GRID GROWTH: 1 unit per step, anchored at (0,0), left-to-right, top-to-bottom
+        float step = 1f;
+
+        for (int y = 0; y < res; y++)
+        {
+            for (int x = 0; x < res; x++)
+            {
+                int i = y * res + x;
+
+                float wx = x * step;
+                float wz = y * step;
+
+                GameObject v;
+#if UNITY_EDITOR
+                if (!Application.isPlaying)
+                    v = (GameObject)PrefabUtility.InstantiatePrefab(vertexPrefab);
+                else
+                    v = Instantiate(vertexPrefab);
+#else
+                v = Instantiate(vertexPrefab);
+#endif
+                v.transform.SetParent(vertexFolder, false);
+                v.transform.localPosition = new Vector3(wx, 0f, wz);
+                v.name = $"Vertex ({i})";
+                vertexControllers[i] = v;
+            }
+        }
+
+        BuildInsidersOutsiders(res, vertexControllers, insiderFolder, outsiderFolder);
+
+        CacheCurrentLevelPositions(res);
+        lastResolution = res;
+    }
+
+    Transform GetOrCreateChild(Transform parent, string name)
+    {
+        Transform child = parent.Find(name);
+        if (!child)
+        {
+            GameObject go = new GameObject(name);
+            go.transform.SetParent(parent, false);
+            child = go.transform;
+        }
+        return child;
+    }
+
+    void BuildInsidersOutsiders(int res, GameObject[] controllers, Transform insiderFolder, Transform outsiderFolder)
+    {
+        ClearChildren(insiderFolder);
+        ClearChildren(outsiderFolder);
+
+        int cellsPerSide = res - 1;
+        int cellCount = cellsPerSide * cellsPerSide;
+
+        List<InsiderLink> inLinks   = new List<InsiderLink>(cellCount);
+        List<OutsiderLink> outLinks = new List<OutsiderLink>(cellCount);
+
+        for (int cy = 0; cy < cellsPerSide; cy++)
+        {
+            for (int cx = 0; cx < cellsPerSide; cx++)
+            {
+                int vAIndex = cy * res + cx;
+                int vBIndex = (cy + 1) * res + (cx + 1);
+
+                Transform vA = controllers[vAIndex].transform;
+                Transform vB = controllers[vBIndex].transform;
+
+                Vector3 center = (vA.position + vB.position) * 0.5f;
+
+                GameObject insiderObj;
+#if UNITY_EDITOR
+                if (!Application.isPlaying)
+                    insiderObj = (GameObject)PrefabUtility.InstantiatePrefab(insiderPrefab);
+                else
+                    insiderObj = Instantiate(insiderPrefab);
+#else
+                insiderObj = Instantiate(insiderPrefab);
+#endif
+                insiderObj.transform.SetParent(insiderFolder, false);
+                insiderObj.transform.position = center;
+                insiderObj.name = $"Insider ({cy * cellsPerSide + cx})";
+
+                inLinks.Add(new InsiderLink
+                {
+                    vertexA = vA,
+                    vertexB = vB,
+                    insiderObject = insiderObj.transform
+                });
+
+                GameObject outsiderObj;
+#if UNITY_EDITOR
+                if (!Application.isPlaying)
+                    outsiderObj = (GameObject)PrefabUtility.InstantiatePrefab(outsiderPrefab);
+                else
+                    outsiderObj = Instantiate(outsiderPrefab);
+#else
+                outsiderObj = Instantiate(outsiderPrefab);
+#endif
+                outsiderObj.transform.SetParent(outsiderFolder, false);
+                outsiderObj.transform.position = center + Vector3.down * 0.5f;
+                outsiderObj.name = $"Outsider ({cy * cellsPerSide + cx})";
+
+                outLinks.Add(new OutsiderLink
+                {
+                    vertexA = vA,
+                    vertexB = vB,
+                    outsiderObject = outsiderObj.transform
+                });
+            }
+        }
+
+        insiders  = inLinks.ToArray();
+        outsiders = outLinks.ToArray();
+    }
+
+    void ClearChildren(Transform t)
+    {
+        if (!t) return;
+#if UNITY_EDITOR
+        if (!Application.isPlaying)
+        {
+            for (int i = t.childCount - 1; i >= 0; i--)
+                DestroyImmediate(t.GetChild(i).gameObject);
+        }
+        else
+        {
+            for (int i = t.childCount - 1; i >= 0; i--)
+                Destroy(t.GetChild(i).gameObject);
+        }
+#else
+        for (int i = t.childCount - 1; i >= 0; i--)
+            Destroy(t.GetChild(i).gameObject);
+#endif
+    }
+
+    public void AutoPopulateVertices()
+    {
+        List<GameObject> collected = new List<GameObject>();
+
+        if (vertexFolders != null)
+        {
+            foreach (var folder in vertexFolders)
+            {
+                if (folder == null) continue;
+
+                Transform[] children = folder.GetComponentsInChildren<Transform>(true);
+                foreach (var t in children)
+                {
+                    if (t == folder) continue;
+                    collected.Add(t.gameObject);
+                }
+            }
+        }
+
+        collected.Sort((a, b) =>
+        {
+            int ia = ExtractTrailingIndex(a.name);
+            int ib = ExtractTrailingIndex(b.name);
+            return ia.CompareTo(ib);
+        });
+
+        vertexControllers = collected.ToArray();
+    }
+
+    static int ExtractTrailingIndex(string name)
+    {
+        int open = name.LastIndexOf('(');
+        int close = name.LastIndexOf(')');
+        if (open >= 0 && close > open)
+        {
+            string inner = name.Substring(open + 1, close - open - 1);
+            if (int.TryParse(inner, out int idx))
+                return idx;
+        }
+        return 0;
+    }
+
+    IEnumerator UpdateMeshRoutine()
+    {
+        while (true)
+        {
+            HandleSubdivisionFlags();
+
+            if (editingToggleObject == null || editingToggleObject.activeInHierarchy)
+                GenerateMesh();
+
+            yield return new WaitForSeconds(updateInterval);
+        }
+    }
+
+#if UNITY_EDITOR
+    void EditorMeshUpdate()
+    {
+        if (!Application.isPlaying &&
+            (editingToggleObject == null || editingToggleObject.activeInHierarchy))
+        {
+            HandleSubdivisionFlags();
+            GenerateMesh();
+        }
+    }
+#endif
+
+    void HandleSubdivisionFlags()
+    {
+        if (increaseSubdivision)
+        {
+            increaseSubdivision = false;
+            SubdivideUp();
+        }
+
+        if (decreaseSubdivision)
+        {
+            decreaseSubdivision = false;
+            SubdivideDown();
+        }
+    }
+
+    void CacheCurrentLevelPositions(int res)
+    {
+        if (vertexControllers == null || vertexControllers.Length != res * res)
+            return;
+
+        Vector3[] positions = new Vector3[res * res];
+        for (int i = 0; i < positions.Length; i++)
+        {
+            Vector3 world = vertexControllers[i].transform.position;
+            Vector3 local = meshTarget.transform.InverseTransformPoint(world);
+            positions[i] = local;
+        }
+
+        levelPositionCache[res] = positions;
+    }
+
+    Vector3[] GetCachedPositionsOrCurrent(int res)
+    {
+        if (levelPositionCache.TryGetValue(res, out var cached) && cached != null && cached.Length == res * res)
+            return cached;
+
+        if (vertexControllers == null || vertexControllers.Length != res * res)
+            return null;
+
+        Vector3[] positions = new Vector3[res * res];
+        for (int i = 0; i < positions.Length; i++)
+        {
+            Vector3 world = vertexControllers[i].transform.position;
+            Vector3 local = meshTarget.transform.InverseTransformPoint(world);
+            positions[i] = local;
+        }
+
+        levelPositionCache[res] = positions;
+        return positions;
+    }
+
+    void SubdivideUp()
+    {
+        int oldRes = Mathf.Clamp(vertexResolution, 2, 1024);
+        int newRes = Mathf.Clamp(oldRes * 2, 2, 1024);
+        if (newRes == oldRes) return;
+
+        vertexResolution = newRes;
+
+        Vector3[] oldPositions = GetCachedPositionsOrCurrent(oldRes);
+        if (oldPositions == null)
+        {
+            Debug.LogError("[RTMG] Cannot subdivide up: missing old positions.");
+            return;
+        }
+
+        Vector3[] newPositions = new Vector3[newRes * newRes];
+
+        for (int y = 0; y < newRes; y++)
+        {
+            for (int x = 0; x < newRes; x++)
+            {
+                int i = y * newRes + x;
+
+                int ox = x / 2;
+                int oy = y / 2;
+
+                bool xEven = (x % 2 == 0);
+                bool yEven = (y % 2 == 0);
+
+                if (xEven && yEven)
+                {
+                    int oi = oy * oldRes + ox;
+                    newPositions[i] = oldPositions[oi];
+                }
+                else if (!xEven && yEven)
+                {
+                    int leftIndex  = oy * oldRes + ox;
+                    int rightIndex = oy * oldRes + Mathf.Min(ox + 1, oldRes - 1);
+                    newPositions[i] = (oldPositions[leftIndex] + oldPositions[rightIndex]) * 0.5f;
+                }
+                else if (xEven && !yEven)
+                {
+                    int bottomIndex = oy * oldRes + ox;
+                    int topIndex    = Mathf.Min(oy + 1, oldRes - 1) * oldRes + ox;
+                    newPositions[i] = (oldPositions[bottomIndex] + oldPositions[topIndex]) * 0.5f;
+                }
+                else
+                {
+                    int i00 = oy * oldRes + ox;
+                    int i10 = oy * oldRes + Mathf.Min(ox + 1, oldRes - 1);
+                    int i01 = Mathf.Min(oy + 1, oldRes - 1) * oldRes + ox;
+                    int i11 = Mathf.Min(oy + 1, oldRes - 1) * oldRes + Mathf.Min(ox + 1, oldRes - 1);
+                    newPositions[i] = (oldPositions[i00] + oldPositions[i10] + oldPositions[i01] + oldPositions[i11]) * 0.25f;
+                }
+            }
+        }
+
+        levelPositionCache[newRes] = newPositions;
+
+        Transform vertexFolder   = GetOrCreateChild(meshTarget.transform, "Vertexes");
+        Transform insiderFolder  = GetOrCreateChild(meshTarget.transform, "Insiders");
+        Transform outsiderFolder = GetOrCreateChild(meshTarget.transform, "Outsiders");
+
+        GameObject[] oldControllers = vertexControllers;
+        GameObject[] newControllers = new GameObject[newRes * newRes];
+
+        if (oldControllers == null || oldControllers.Length != oldRes * oldRes)
+        {
+            GenerateInitialGrid(newRes);
+            return;
+        }
+
+        for (int y = 0; y < newRes; y++)
+        {
+            for (int x = 0; x < newRes; x++)
+            {
+                int i = y * newRes + x;
+
+                int ox = x / 2;
+                int oy = y / 2;
+
+                bool xEven = (x % 2 == 0);
+                bool yEven = (y % 2 == 0);
+
+                if (xEven && yEven)
+                {
+                    int oldIndex = oy * oldRes + ox;
+                    GameObject existing = oldControllers[oldIndex];
+                    newControllers[i] = existing;
+                    existing.transform.SetParent(vertexFolder, false);
+
+                    Vector3 local = newPositions[i];
+                    Vector3 world = meshTarget.transform.TransformPoint(local);
+                    existing.transform.position = world;
+                    existing.name = $"Vertex ({i})";
+                }
+                else
+                {
+                    GameObject v;
+#if UNITY_EDITOR
+                    if (!Application.isPlaying)
+                        v = (GameObject)PrefabUtility.InstantiatePrefab(vertexPrefab);
+                    else
+                        v = Instantiate(vertexPrefab);
+#else
+                    v = Instantiate(vertexPrefab);
+#endif
+                    v.transform.SetParent(vertexFolder, false);
+
+                    Vector3 local = newPositions[i];
+                    Vector3 world = meshTarget.transform.TransformPoint(local);
+                    v.transform.position = world;
+                    v.name = $"Vertex ({i})";
+                    newControllers[i] = v;
+                }
+            }
+        }
+
+        if (oldControllers != null)
+        {
+            HashSet<GameObject> survivors = new HashSet<GameObject>(newControllers);
+            for (int i = 0; i < oldControllers.Length; i++)
+            {
+                GameObject c = oldControllers[i];
+                if (c != null && !survivors.Contains(c))
+                {
+#if UNITY_EDITOR
+                    if (!Application.isPlaying)
+                        DestroyImmediate(c);
+                    else
+                        Destroy(c);
+#else
+                    Destroy(c);
+#endif
+                }
+            }
+        }
+
+        vertexControllers = newControllers;
+
+        BuildInsidersOutsiders(newRes, vertexControllers, insiderFolder, outsiderFolder);
+        lastResolution = newRes;
+    }
+
+    void SubdivideDown()
+    {
+        int oldRes = Mathf.Clamp(vertexResolution, 2, 1024);
+        if (oldRes <= 2) return;
+
+        int newRes = Mathf.Clamp(oldRes / 2, 2, 1024);
+        if (newRes == oldRes) return;
+
+        vertexResolution = newRes;
+
+        Vector3[] newPositions = null;
+        if (!levelPositionCache.TryGetValue(newRes, out newPositions) || newPositions == null || newPositions.Length != newRes * newRes)
+        {
+            if (vertexControllers == null || vertexControllers.Length != oldRes * oldRes)
+            {
+                Debug.LogError("[RTMG] Cannot subdivide down: missing controllers.");
+                return;
+            }
+
+            newPositions = new Vector3[newRes * newRes];
+            for (int y = 0; y < newRes; y++)
+            {
+                for (int x = 0; x < newRes; x++)
+                {
+                    int i = y * newRes + x;
+                    int fx = x * 2;
+                    int fy = y * 2;
+                    int fi = fy * oldRes + fx;
+
+                    Vector3 world = vertexControllers[fi].transform.position;
+                    Vector3 local = meshTarget.transform.InverseTransformPoint(world);
+                    newPositions[i] = local;
+                }
+            }
+
+            levelPositionCache[newRes] = newPositions;
+        }
+
+        Transform vertexFolder   = GetOrCreateChild(meshTarget.transform, "Vertexes");
+        Transform insiderFolder  = GetOrCreateChild(meshTarget.transform, "Insiders");
+        Transform outsiderFolder = GetOrCreateChild(meshTarget.transform, "Outsiders");
+
+        GameObject[] oldControllers = vertexControllers;
+        GameObject[] newControllers = new GameObject[newRes * newRes];
+
+        if (oldControllers == null || oldControllers.Length != oldRes * oldRes)
+        {
+            GenerateInitialGrid(newRes);
+            return;
+        }
+
+        for (int y = 0; y < newRes; y++)
+        {
+            for (int x = 0; x < newRes; x++)
+            {
+                int i = y * newRes + x;
+                int fx = x * 2;
+                int fy = y * 2;
+                int fi = fy * oldRes + fx;
+
+                GameObject existing = oldControllers[fi];
+                if (existing == null)
+                {
+#if UNITY_EDITOR
+                    if (!Application.isPlaying)
+                        existing = (GameObject)PrefabUtility.InstantiatePrefab(vertexPrefab);
+                    else
+                        existing = Instantiate(vertexPrefab);
+#else
+                    existing = Instantiate(vertexPrefab);
+#endif
+                }
+
+                existing.transform.SetParent(vertexFolder, false);
+
+                Vector3 local = newPositions[i];
+                Vector3 world = meshTarget.transform.TransformPoint(local);
+                existing.transform.position = world;
+                existing.name = $"Vertex ({i})";
+
+                newControllers[i] = existing;
+            }
+        }
+
+        if (oldControllers != null)
+        {
+            HashSet<GameObject> survivors = new HashSet<GameObject>(newControllers);
+            for (int i = 0; i < oldControllers.Length; i++)
+            {
+                GameObject c = oldControllers[i];
+                if (c != null && !survivors.Contains(c))
+                {
+#if UNITY_EDITOR
+                    if (!Application.isPlaying)
+                        DestroyImmediate(c);
+                    else
+                        Destroy(c);
+#else
+                    Destroy(c);
+#endif
+                }
+            }
+        }
+
+        vertexControllers = newControllers;
+
+        BuildInsidersOutsiders(newRes, vertexControllers, insiderFolder, outsiderFolder);
+        lastResolution = newRes;
+    }
+
+    void HandleResolutionChangeIfNeeded()
+    {
+        int res = Mathf.Clamp(vertexResolution, 2, 1024);
+        if (lastResolution == -1)
+        {
+            lastResolution = res;
+            return;
+        }
+
+        if (res == lastResolution)
+            return;
+
+        if (resetGridOnResolutionChange)
+        {
+            GenerateInitialGrid(res);
+        }
+        else
+        {
+            // Preserve shape: scale positions from old grid to new grid, anchored at (0,0)
+            if (vertexControllers == null || vertexControllers.Length != lastResolution * lastResolution)
+            {
+                GenerateInitialGrid(res);
+            }
+            else
+            {
+                Transform vertexFolder   = GetOrCreateChild(meshTarget.transform, "Vertexes");
+                Transform insiderFolder  = GetOrCreateChild(meshTarget.transform, "Insiders");
+                Transform outsiderFolder = GetOrCreateChild(meshTarget.transform, "Outsiders");
+
+                Vector3[] oldPositions = GetCachedPositionsOrCurrent(lastResolution);
+                if (oldPositions == null)
+                {
+                    GenerateInitialGrid(res);
+                }
+                else
+                {
+                    Vector3[] newPositions = new Vector3[res * res];
+
+                    float oldMax = (lastResolution - 1);
+                    float newMax = (res - 1);
+
+                    for (int y = 0; y < res; y++)
+                    {
+                        for (int x = 0; x < res; x++)
+                        {
+                            int i = y * res + x;
+
+                            float u = (res == 1) ? 0f : (float)x / newMax;
+                            float v = (res == 1) ? 0f : (float)y / newMax;
+
+                            float oldX = u * oldMax;
+                            float oldY = v * oldMax;
+
+                            int x0 = Mathf.FloorToInt(oldX);
+                            int y0 = Mathf.FloorToInt(oldY);
+                            int x1 = Mathf.Min(x0 + 1, lastResolution - 1);
+                            int y1 = Mathf.Min(y0 + 1, lastResolution - 1);
+
+                            float tx = oldX - x0;
+                            float ty = oldY - y0;
+
+                            Vector3 p00 = oldPositions[y0 * lastResolution + x0];
+                            Vector3 p10 = oldPositions[y0 * lastResolution + x1];
+                            Vector3 p01 = oldPositions[y1 * lastResolution + x0];
+                            Vector3 p11 = oldPositions[y1 * lastResolution + x1];
+
+                            Vector3 p0 = Vector3.Lerp(p00, p10, tx);
+                            Vector3 p1 = Vector3.Lerp(p01, p11, tx);
+                            Vector3 p  = Vector3.Lerp(p0,  p1,  ty);
+
+                            newPositions[i] = p;
+                        }
+                    }
+
+                    levelPositionCache[res] = newPositions;
+
+                    GameObject[] newControllers = new GameObject[res * res];
+
+                    ClearChildren(vertexFolder);
+
+                    for (int y = 0; y < res; y++)
+                    {
+                        for (int x = 0; x < res; x++)
+                        {
+                            int i = y * res + x;
+
+                            GameObject v;
+#if UNITY_EDITOR
+                            if (!Application.isPlaying)
+                                v = (GameObject)PrefabUtility.InstantiatePrefab(vertexPrefab);
+                            else
+                                v = Instantiate(vertexPrefab);
+#else
+                            v = Instantiate(vertexPrefab);
+#endif
+                            v.transform.SetParent(vertexFolder, false);
+
+                            Vector3 local = newPositions[i];
+                            Vector3 world = meshTarget.transform.TransformPoint(local);
+                            v.transform.position = world;
+                            v.name = $"Vertex ({i})";
+                            newControllers[i] = v;
+                        }
+                    }
+
+                    vertexControllers = newControllers;
+                    BuildInsidersOutsiders(res, vertexControllers, insiderFolder, outsiderFolder);
+                }
+            }
+        }
+
+        lastResolution = res;
+    }
+
+    public void GenerateMesh()
+    {
+        HandleResolutionChangeIfNeeded();
+
+        if (!meshTarget)
+            return;
+
+        if (!meshFilter)
+            meshFilter = meshTarget.GetComponent<MeshFilter>();
+
+        if (!meshFilter)
+            return;
+
+        if (mesh == null)
+            mesh = meshFilter.sharedMesh != null ? meshFilter.sharedMesh : new Mesh { name = "GeneratedTerrainMesh" };
+
+        int res = Mathf.Clamp(vertexResolution, 2, 1024);
+        vertexResolution = res;
+        int count = res * res;
+
+        if (cachedVertices == null || cachedVertices.Length != count)
+            cachedVertices = new Vector3[count];
+
+        if (vertexControllers == null || vertexControllers.Length != count)
+            return;
+
+        Vector3[] vertices = new Vector3[count];
+        Vector2[] uvs = new Vector2[count];
+        int[] triangles = new int[(res - 1) * (res - 1) * 6];
+
+        // Mesh vertices follow the same 1-unit grid as controllers (cube grows with resolution)
+        float step = 1f;
+
+        float uvStep = (res > 1) ? 1f / (res - 1) : 1f;
+
+        for (int y = 0; y < res; y++)
+        {
+            for (int x = 0; x < res; x++)
+            {
+                int i = y * res + x;
+
+                Vector3 basePos = new Vector3(x * step, 0f, y * step);
+                Vector3 v = basePos;
+
+                GameObject controller = vertexControllers[i];
+
+                if (controller != null && controller.activeInHierarchy)
+                {
+                    Vector3 worldPos = controller.transform.position;
+
+                    if (float.IsNaN(worldPos.x) || float.IsNaN(worldPos.y) || float.IsNaN(worldPos.z))
+                    {
+                        Debug.LogError($"[RTMG] NaN controller position at index {i} on {controller.name}", controller);
+                        worldPos = basePos;
+                    }
+
+                    v = meshTarget.transform.InverseTransformPoint(worldPos);
+
+                    if (float.IsNaN(v.x) || float.IsNaN(v.y) || float.IsNaN(v.z))
+                    {
+                        Debug.LogError($"[RTMG] NaN after InverseTransformPoint at index {i} on {meshTarget.name}", meshTarget);
+                        v = basePos;
+                    }
+
+                    cachedVertices[i] = v;
+                }
+                else
+                {
+                    Vector3 cached = cachedVertices[i];
+
+                    if (float.IsNaN(cached.x) || float.IsNaN(cached.y) || float.IsNaN(cached.z))
+                    {
+                        Debug.LogError($"[RTMG] NaN in cachedVertices at index {i}, resetting to basePos.", this);
+                        cached = basePos;
+                        cachedVertices[i] = cached;
+                    }
+
+                    if (cached == Vector3.zero)
+                        cached = basePos;
+
+                    v = cached;
+                }
+
+                vertices[i] = v;
+
+                float u = (res > 1) ? (x * uvStep) : 0f;
+                float w = (res > 1) ? (y * uvStep) : 0f;
+                uvs[i] = new Vector2(u, w);
+            }
+        }
+
+        int tri = 0;
+        for (int y = 0; y < res - 1; y++)
+        {
+            for (int x = 0; x < res - 1; x++)
+            {
+                int i = y * res + x;
+
+                if (!flipWindingZ)
+                {
+                    triangles[tri++] = i;
+                    triangles[tri++] = i + res + 1;
+                    triangles[tri++] = i + res;
+
+                    triangles[tri++] = i;
+                    triangles[tri++] = i + 1;
+                    triangles[tri++] = i + res + 1;
+                }
+                else
+                {
+                    triangles[tri++] = i;
+                    triangles[tri++] = i + res;
+                    triangles[tri++] = i + res + 1;
+
+                    triangles[tri++] = i;
+                    triangles[tri++] = i + res + 1;
+                    triangles[tri++] = i + 1;
+                }
+            }
+        }
+
+        mesh.Clear();
+        mesh.vertices = vertices;
+        mesh.triangles = triangles;
+        mesh.uv = uvs;
+        mesh.RecalculateNormals();
+        mesh.RecalculateBounds();
+
+        if (meshFilter.sharedMesh != mesh)
+            meshFilter.sharedMesh = mesh;
+
+        if (maintainWatertightInsiders && insiders != null)
+        {
+            foreach (var link in insiders)
+                UpdateInsider(link);
+        }
+
+        if (maintainWatertightOutsiders && outsiders != null)
+        {
+            foreach (var link in outsiders)
+                UpdateOutsider(link);
+        }
+
+        UpdateHullCube();
+
+        CacheCurrentLevelPositions(res);
+    }
+
+    // INSIDERS: belly-rubbing between vertices, always touching some part of the segment.
+    void UpdateInsider(InsiderLink link)
+    {
+        if (link.vertexA == null || link.vertexB == null || link.insiderObject == null)
+            return;
+
+        Vector3 a = link.vertexA.position;
+        Vector3 b = link.vertexB.position;
+
+        float cx = (a.x + b.x) * 0.5f;
+        float cy = (a.y + b.y) * 0.5f;
+        float cz = (a.z + b.z) * 0.5f;
+
+        float sx = Mathf.Abs(a.x - b.x);
+        float sz = Mathf.Abs(a.z - b.z);
+
+        float dy = Mathf.Abs(a.y - b.y);
+        float sy = Mathf.Max(thickness, dy);
+
+        // Ensure at least a minimal belly thickness in X/Z so it always "hugs" some part.
+        float minBelly = Mathf.Max(0.01f, thickness * 0.5f);
+        if (sx < minBelly) sx = minBelly;
+        if (sz < minBelly) sz = minBelly;
+
+        link.insiderObject.position = new Vector3(cx, cy, cz);
+        link.insiderObject.rotation = Quaternion.identity;
+        link.insiderObject.localScale = new Vector3(sx, sy, sz);
+    }
+
+    // OUTSIDERS: corner-kissing. For flat spans, they sit at -0.5 or 0 and only corners touch.
+    void UpdateOutsider(OutsiderLink link)
+    {
+        if (link.vertexA == null || link.vertexB == null || link.outsiderObject == null)
+            return;
+
+        Vector3 a = link.vertexA.position;
+        Vector3 b = link.vertexB.position;
+
+        float cx = (a.x + b.x) * 0.5f;
+        float cz = (a.z + b.z) * 0.5f;
+
+        float topY    = Mathf.Max(a.y, b.y);
+        float bottomY = Mathf.Min(a.y, b.y);
+        float dy      = topY - bottomY;
+
+        float dx = Mathf.Abs(a.x - b.x);
+        float dz = Mathf.Abs(a.z - b.z);
+
+        float sx = dx;
+        float sz = dz;
+
+        float sy;
+        float cy;
+
+        if (!enableHullCube)
+        {
+            // 2D floor mode: outsiders live at -0.5 unless there's vertical span.
+            if (dy < 0.0001f)
+            {
+                // Flat: outsiders are a column of height 1, centered at -0.5
+                sy = Mathf.Max(thickness, 1f);
+                cy = -0.5f;
+            }
+            else
+            {
+                sy = Mathf.Max(thickness, dy);
+                cy = (topY + bottomY) * 0.5f;
+            }
+        }
+        else
+        {
+            // Cube mode: outsiders span full vertical distance between vertices.
+            if (dy < 0.0001f)
+            {
+                sy = Mathf.Max(thickness, 1f);
+                cy = 0f;
+            }
+            else
+            {
+                sy = Mathf.Max(thickness, dy);
+                cy = (topY + bottomY) * 0.5f;
+            }
+        }
+
+        // Corner-kissing guarantee:
+        // We keep sx,sz equal to dx,dz so the cube's corners align with the vertex corners.
+        // If dx or dz is zero (degenerate), enforce a minimal footprint so it still exists.
+        float minFoot = Mathf.Max(0.01f, thickness * 0.5f);
+        if (sx < minFoot) sx = minFoot;
+        if (sz < minFoot) sz = minFoot;
+
+        link.outsiderObject.position = new Vector3(cx, cy, cz);
+        link.outsiderObject.rotation = Quaternion.identity;
+        link.outsiderObject.localScale = new Vector3(sx, sy, sz);
+    }
+
+    void UpdateHullCube()
+    {
+        EnsureHullCubeRoot();
+
+        if (!enableHullCube)
+        {
+            if (hullCubeRoot != null)
+                hullCubeRoot.gameObject.SetActive(false);
+            return;
+        }
+
+        if (hullCubeRoot != null && !hullCubeRoot.gameObject.activeSelf)
+            hullCubeRoot.gameObject.SetActive(true);
+
+        if (hullFaces == null || hullFaces.Count == 0)
+            InitHullFaces();
+
+        hullCubeRoot.position = meshTarget.transform.position;
+        hullCubeRoot.rotation = meshTarget.transform.rotation;
+        hullCubeRoot.localScale = Vector3.one;
+    }
+
+    // ----------------------------------------------------------------------
+    // Orchestrator-facing API (used by CVEngineOrchestrator)
+    // ----------------------------------------------------------------------
+
+    public void SetFidelity(RuntimeTerrainMeshFidelity fidelity)
+    {
+        int targetRes;
+
+        switch (fidelity)
+        {
+            case RuntimeTerrainMeshFidelity.Lowest:
+                targetRes = 4;
+                break;
+            case RuntimeTerrainMeshFidelity.Low:
+                targetRes = 8;
+                break;
+            case RuntimeTerrainMeshFidelity.Medium:
+                targetRes = 16;
+                break;
+            case RuntimeTerrainMeshFidelity.High:
+                targetRes = 32;
+                break;
+            default:
+                targetRes = vertexResolution;
+                break;
+        }
+
+        targetRes = Mathf.Clamp(targetRes, 2, 1024);
+
+        if (vertexResolution == targetRes)
+            return;
+
+        vertexResolution = targetRes;
+        HandleResolutionChangeIfNeeded();
+    }
+
+    public void SetAdaptiveFidelity()
+    {
+        // Simple FPS-based heuristic; you can swap this for something more domain-specific.
+        if (!Application.isPlaying)
+        {
+            SetFidelity(RuntimeTerrainMeshFidelity.Medium);
+            return;
+        }
+
+        float dt = Time.deltaTime;
+        if (dt <= 0f)
+        {
+            SetFidelity(RuntimeTerrainMeshFidelity.Medium);
+            return;
+        }
+
+        float fps = 1f / dt;
+        if (fps > 55f)
+            SetFidelity(RuntimeTerrainMeshFidelity.High);
+        else if (fps > 35f)
+            SetFidelity(RuntimeTerrainMeshFidelity.Medium);
+        else if (fps > 20f)
+            SetFidelity(RuntimeTerrainMeshFidelity.Low);
+        else
+            SetFidelity(RuntimeTerrainMeshFidelity.Lowest);
+    }
+
+    public void RequestRuntimeRedetection()
+    {
+        // Direct, immediate regeneration; CVEngineOrchestrator already throttles calls via phases.
+        GenerateMesh();
+    }
+
+    public GameObject[] GetVertexControllers() => vertexControllers;
+    public InsiderLink[] GetInsiders() => insiders;
+    public OutsiderLink[] GetOutsiders() => outsiders;
+}
+
+public enum RuntimeTerrainMeshFidelity
+{
+    Lowest,
+    Low,
+    Medium,
+    High
+}
+
+===== END: RuntimeTerrainMeshGenerator.cs =====
+
+===== BEGIN: RuntimeTerrainMeshSilhouetteBinder.cs =====
+using System.Collections.Generic;
+using UnityEngine;
+
+using CVatGPT;
+
+/// <summary>
+/// Binds CVatGPT.Sihouetter polygons to RuntimeTerrainMeshGenerator vertices.
+/// Phase-agnostic: call TickBind() from CVEngineOrchestrator when you want
+/// the mesh to "hug" the current silhouette (before stamping / locking).
+/// </summary>
+[DefaultExecutionOrder(-450)]
+public class RuntimeTerrainMeshSilhouetteBinder : MonoBehaviour
+{
+    [Header("References")]
+    public CVatGPT.Sihouetter sihouetter;
+    public RuntimeTerrainMeshGenerator runtimeTerrainMesh;
+
+    [Header("Binding Settings")]
+    [Tooltip("Maximum world-space distance from a projected silhouette point to a vertex to consider it 'bound'.")]
+    public float maxBindDistance = 0.5f;
+
+    [Tooltip("How strongly silhouette pulls vertices toward it (0..1).")]
+    [Range(0f, 1f)]
+    public float bindLerp = 0.5f;
+
+    [Tooltip("If true, only moves vertices that are not yet 'locked' by stamps.")]
+    public bool respectLocks = true;
+
+    [Tooltip("Optional per-vertex lock flags (same length as vertexControllers).")]
+    public bool[] vertexLocked;
+
+    [Header("Face Selection")]
+    [Tooltip("Optional transform representing the camera or device pose used to decide which face is active.")]
+    public Transform viewTransform;
+
+    [Tooltip("Angle threshold (degrees) to consider a face 'front-facing' to the view.")]
+    public float faceDotThreshold = 0.5f;
+
+    private Camera _mainCam;
+
+    private void Awake()
+    {
+        if (!sihouetter)
+            sihouetter = FindObjectOfType<CVatGPT.Sihouetter>();
+
+        if (!runtimeTerrainMesh)
+            runtimeTerrainMesh = FindObjectOfType<RuntimeTerrainMeshGenerator>();
+
+        _mainCam = Camera.main;
+    }
+
+    /// <summary>
+    /// Call this from CVEngineOrchestrator during Sense or Stamp phase.
+    /// </summary>
+    public void TickBind()
+    {
+        if (!sihouetter || !sihouetter.HasValidFrame())
+            return;
+
+        if (!runtimeTerrainMesh || runtimeTerrainMesh.GetVertexControllers() == null)
+            return;
+
+        var polys = sihouetter.polygons;
+        if (polys == null || polys.Count == 0)
+            return;
+
+        EnsureLockArray();
+
+        Vector3 faceNormal = Vector3.up;
+        Vector3 faceOrigin = runtimeTerrainMesh.meshTarget
+            ? runtimeTerrainMesh.meshTarget.transform.position
+            : Vector3.zero;
+
+        SelectActiveFace(ref faceNormal, ref faceOrigin);
+
+        ProjectPolygonsToFaceAndBind(polys, faceOrigin, faceNormal);
+    }
+
+    void EnsureLockArray()
+    {
+        var verts = runtimeTerrainMesh.GetVertexControllers();
+        if (verts == null) return;
+
+        if (vertexLocked == null || vertexLocked.Length != verts.Length)
+            vertexLocked = new bool[verts.Length];
+    }
+
+    void SelectActiveFace(ref Vector3 faceNormal, ref Vector3 faceOrigin)
+    {
+        Transform target = viewTransform != null ? viewTransform : (_mainCam != null ? _mainCam.transform : null);
+        if (target == null || !runtimeTerrainMesh.meshTarget)
+            return;
+
+        var t = runtimeTerrainMesh.meshTarget.transform;
+        Vector3[] normals =
+        {
+            t.up,
+            t.forward,
+            -t.forward,
+            t.right,
+            -t.right
+        };
+
+        Vector3 viewDir = (target.position - t.position).normalized;
+        float bestDot = -1f;
+        int bestIndex = 0;
+
+        for (int i = 0; i < normals.Length; i++)
+        {
+            float d = Vector3.Dot(normals[i], viewDir);
+            if (d > bestDot)
+            {
+                bestDot = d;
+                bestIndex = i;
+            }
+        }
+
+        if (bestDot < faceDotThreshold)
+        {
+            faceNormal = t.up;
+            faceOrigin = t.position;
+            return;
+        }
+
+        faceNormal = normals[bestIndex];
+        faceOrigin = t.position;
+    }
+
+    void ProjectPolygonsToFaceAndBind(List<List<Vector2>> polys, Vector3 faceOrigin, Vector3 faceNormal)
+    {
+        var verts = runtimeTerrainMesh.GetVertexControllers();
+        if (verts == null) return;
+
+        Vector3 tangent = Vector3.Cross(faceNormal, Vector3.up);
+        if (tangent.sqrMagnitude < 0.0001f)
+            tangent = Vector3.Cross(faceNormal, Vector3.right);
+        tangent.Normalize();
+        Vector3 bitangent = Vector3.Cross(faceNormal, tangent);
+
+        int pw = sihouetter.ProcessingWidth;
+        int ph = sihouetter.ProcessingHeight;
+
+        if (pw <= 0 || ph <= 0)
+            return;
+
+        foreach (var poly in polys)
+        {
+            if (poly == null || poly.Count < 3)
+                continue;
+
+            for (int i = 0; i < poly.Count; i++)
+            {
+                Vector2 p = poly[i];
+
+                float u = p.x / Mathf.Max(1, pw - 1);
+                float v = p.y / Mathf.Max(1, ph - 1);
+
+                int res = Mathf.Max(2, runtimeTerrainMesh.vertexResolution);
+                float span = (res - 1);
+
+                float lx = (u - 0.5f) * span;
+                float ly = (v - 0.5f) * span;
+
+                Vector3 worldOnPlane = faceOrigin + tangent * lx + bitangent * ly;
+
+                int nearestIndex = -1;
+                float nearestDist = maxBindDistance * maxBindDistance;
+
+                for (int vi = 0; vi < verts.Length; vi++)
+                {
+                    if (respectLocks && vertexLocked != null && vertexLocked[vi])
+                        continue;
+
+                    var vc = verts[vi];
+                    if (!vc) continue;
+
+                    float d2 = (vc.transform.position - worldOnPlane).sqrMagnitude;
+                    if (d2 < nearestDist)
+                    {
+                        nearestDist = d2;
+                        nearestIndex = vi;
+                    }
+                }
+
+                if (nearestIndex >= 0)
+                {
+                    var vc = verts[nearestIndex];
+                    Vector3 curr = vc.transform.position;
+                    Vector3 target = Vector3.Lerp(curr, worldOnPlane, bindLerp);
+                    vc.transform.position = target;
+                }
+            }
+        }
+    }
+
+    public void LockVertex(int index)
+    {
+        if (vertexLocked == null || index < 0 || index >= vertexLocked.Length)
+            return;
+        vertexLocked[index] = true;
+    }
+
+    public void UnlockVertex(int index)
+    {
+        if (vertexLocked == null || index < 0 || index >= vertexLocked.Length)
+            return;
+        vertexLocked[index] = false;
+    }
+}
+
+===== END: RuntimeTerrainMeshSilhouetteBinder.cs =====
+
+===== BEGIN: BorgTesseractHull.cs =====
+using System.Collections.Generic;
+using UnityEngine;
+using CVatGPT;
+
+[DisallowMultipleComponent]
+public class BorgTesseractHull : MonoBehaviour
+{
+    [Header("Core References")]
+    public CVatGPT.Sihouetter sihouetter;
+    public CVatGPTPrefabManager prefabManager;
+    public Camera worldCamera;
+
+    [Header("Octree Settings")]
+    public float cubeSize = 1f;
+    public int octreeDepth = 3;
+
+    [Header("Runtime")]
+    public bool autoUpdate = true;
+    public float updateInterval = 0.1f;
+    private float updateTimer;
+
+    [Header("Space Mode")]
+    public bool useWorldSpace = false; // default: local like BorgCubeRuntime
+
+    private RjoOctree octree;
+    private readonly List<RjoOctree.Node> leaves = new();
+
+    // 2D square-pyramid kernel (Manhattan-ish, simple 5x5)
+    private static readonly int[,] kernel =
+    {
+        { 2, 2, 2, 2, 2 },
+        { 2, 1, 1, 1, 2 },
+        { 2, 1, 0, 1, 2 },
+        { 2, 1, 1, 1, 2 },
+        { 2, 2, 2, 2, 2 }
+    };
+
+    private void Awake()
+    {
+        if (sihouetter == null)
+            sihouetter = FindObjectOfType<CVatGPT.Sihouetter>();
+
+        if (prefabManager == null)
+            prefabManager = FindObjectOfType<CVatGPTPrefabManager>();
+
+        if (worldCamera == null)
+            worldCamera = Camera.main;
+    }
+
+    private void Start()
+    {
+        Vector3 center = transform.position;
+        octree = new RjoOctree(center, cubeSize, octreeDepth, sihouetter, worldCamera);
+
+        SpawnVertexShell();
+    }
+
+    private void Update()
+    {
+        if (!autoUpdate || octree == null)
+            return;
+
+        updateTimer += Time.deltaTime;
+        if (updateTimer < updateInterval)
+            return;
+
+        updateTimer = 0f;
+
+        octree.center = transform.position;
+        octree.size = cubeSize;
+        octree.Update();
+
+        RebuildLeavesAndInsidersPositions();
+    }
+
+    private void RebuildLeavesAndInsidersPositions()
+    {
+        if (octree == null || prefabManager == null)
+            return;
+
+        leaves.Clear();
+        octree.CollectLeaves(octree.root, leaves);
+
+        var insiders = prefabManager.activeInsiderPrefabs;
+        if (insiders == null || insiders.Count == 0)
+            return;
+
+        int count = Mathf.Min(leaves.Count, insiders.Count);
+
+        for (int i = 0; i < count; i++)
+        {
+            var leaf = leaves[i];
+            var go = insiders[i];
+            if (go == null) continue;
+
+            Vector3 pos = leaf.position;
+
+            if (!useWorldSpace)
+            {
+                Vector3 localPos = transform.InverseTransformPoint(pos);
+                go.transform.localPosition = localPos;
+            }
+            else
+            {
+                go.transform.position = pos;
+            }
+
+            float s = Mathf.Clamp01(leaf.stability);
+            go.transform.localScale = Vector3.one * prefabManager.insiderScale * Mathf.Lerp(0.25f, 1f, s);
+        }
+    }
+
+    private void SpawnVertexShell()
+    {
+        if (prefabManager == null)
+            return;
+
+        prefabManager.ClearVertexPrefabs();
+
+        int steps = 2;
+        for (int x = 0; x <= steps; x++)
+        {
+            for (int y = 0; y <= steps; y++)
+            {
+                for (int z = 0; z <= steps; z++)
+                {
+                    int edgeCount = 0;
+                    if (x == 0 || x == steps) edgeCount++;
+                    if (y == 0 || y == steps) edgeCount++;
+                    if (z == 0 || z == steps) edgeCount++;
+                    if (edgeCount < 2) continue;
+
+                    Vector3 local = new Vector3(
+                        Mathf.Lerp(-0.5f, 0.5f, x / (float)steps),
+                        Mathf.Lerp(-0.5f, 0.5f, y / (float)steps),
+                        Mathf.Lerp(-0.5f, 0.5f, z / (float)steps)
+                    ) * cubeSize;
+
+                    prefabManager.SpawnVertexPrefab(local);
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------
+    // CORE: project egg shape onto hull and extrude outward
+    // ---------------------------------------------------------
+    public void MatchEggAndExtrude(BorgCubeRuntime eggRuntime)
+    {
+        if (octree == null || eggRuntime == null || prefabManager == null)
+            return;
+
+        var hullInsiders = prefabManager.activeInsiderPrefabs;
+        var eggInsiders  = eggRuntime.prefabManager.activeInsiderPrefabs;
+
+        if (hullInsiders == null || eggInsiders == null)
+            return;
+
+        int count = Mathf.Min(hullInsiders.Count, eggInsiders.Count);
+        if (count == 0) return;
+
+        Vector3 extrudeDir = worldCamera != null ? worldCamera.transform.forward : transform.forward;
+
+        for (int i = 0; i < count; i++)
+        {
+            GameObject hullGo = hullInsiders[i];
+            GameObject eggGo  = eggInsiders[i];
+            if (hullGo == null || eggGo == null) continue;
+
+            Vector3 basePos;
+            if (!useWorldSpace)
+            {
+                Vector3 eggWorld = eggGo.transform.position;
+                basePos = transform.InverseTransformPoint(eggWorld);
+                hullGo.transform.localPosition = basePos;
+            }
+            else
+            {
+                basePos = eggGo.transform.position;
+                hullGo.transform.position = basePos;
+            }
+
+            int faceSize = Mathf.RoundToInt(Mathf.Sqrt(count));
+            if (faceSize * faceSize == count)
+            {
+                int x = i % faceSize;
+                int y = i / faceSize;
+
+                int kx = Mathf.Clamp(x - faceSize / 2 + 2, 0, 4);
+                int ky = Mathf.Clamp(y - faceSize / 2 + 2, 0, 4);
+
+                int kVal = kernel[ky, kx];
+                float intensity = 1f;
+                if (kVal == 1) intensity = 1f / 9f;
+                else if (kVal == 2) intensity = 1f / 25f;
+
+                Vector3 offset = extrudeDir * intensity * (cubeSize * 0.5f);
+
+                if (!useWorldSpace)
+                {
+                    hullGo.transform.localPosition += transform.InverseTransformDirection(offset);
+                }
+                else
+                {
+                    hullGo.transform.position += offset;
+                }
+            }
+        }
+    }
+}
+
+===== END: BorgTesseractHull.cs =====
+
+===== BEGIN: BorgCubeRuntime.cs =====
+using System.Collections.Generic;
+using System.IO;
+using UnityEngine;
+using CVatGPT;
+
+[DisallowMultipleComponent]
+public class BorgCubeRuntime : MonoBehaviour
+{
+    [Header("Core References")]
+    public CVatGPT.Sihouetter sihouetter;
+    public CVatGPTPrefabManager prefabManager;
+    public Camera worldCamera;
+
+    [Header("Octree Settings")]
+    public float cubeSize = 1f;
+    public int octreeDepth = 3;
+
+    [Header("Scanning")]
+    public bool autoUpdate = true;
+    public float updateInterval = 0.1f;
+    private float updateTimer;
+
+    [Header("Export")]
+    public string exportFolder = "BorgScans";
+    public string exportFileName = "scan.txt";
+
+    private RjoOctree octree;
+    private List<RjoOctree.Node> leaves = new();
+
+    private void Awake()
+    {
+        if (sihouetter == null)
+            sihouetter = FindObjectOfType<CVatGPT.Sihouetter>();
+
+        if (prefabManager == null)
+            prefabManager = FindObjectOfType<CVatGPTPrefabManager>();
+
+        if (worldCamera == null)
+            worldCamera = Camera.main;
+    }
+
+    private void Start()
+    {
+        Vector3 center = transform.position;
+        octree = new RjoOctree(center, cubeSize, octreeDepth, sihouetter, worldCamera);
+
+        // IMPORTANT:
+        // Do NOT respawn or clear any vertex/insider objects here.
+        // The intelligence engine (insiders + vertices) already exists in the scene
+        // and is only to be READ and MOVED, never destroyed or recreated.
+        //
+        // So we REMOVE the call to SpawnVertexShell().
+        // SpawnVertexShell();
+    }
+
+    private void Update()
+    {
+        if (!autoUpdate || octree == null)
+            return;
+
+        updateTimer += Time.deltaTime;
+        if (updateTimer < updateInterval)
+            return;
+
+        updateTimer = 0f;
+
+        octree.center = transform.position;
+        octree.size = cubeSize;
+        octree.Update();
+
+        RebuildLeavesAndInsidersPositions();
+    }
+
+    private void RebuildLeavesAndInsidersPositions()
+    {
+        if (octree == null || prefabManager == null)
+            return;
+
+        leaves.Clear();
+        octree.CollectLeaves(octree.root, leaves);
+
+        var insiders = prefabManager.activeInsiderPrefabs;
+        if (insiders == null || insiders.Count == 0)
+            return;
+
+        int count = Mathf.Min(leaves.Count, insiders.Count);
+
+        for (int i = 0; i < count; i++)
+        {
+            var leaf = leaves[i];
+            var go = insiders[i];
+            if (go == null) continue;
+
+            Vector3 localPos = transform.InverseTransformPoint(leaf.position);
+            go.transform.localPosition = localPos;
+
+            float s = Mathf.Clamp01(leaf.stability);
+            go.transform.localScale = Vector3.one * prefabManager.insiderScale * Mathf.Lerp(0.25f, 1f, s);
+        }
+    }
+
+    // NOTE:
+    // SpawnVertexShell is now UNUSED on purpose.
+    // We keep it here in case you later want a separate, visual-only shell,
+    // but it should NOT be called for the intelligence engine.
+
+    private void SpawnVertexShell()
+    {
+        if (prefabManager == null)
+            return;
+
+        // DO NOT clear or destroy any existing vertices.
+        // DO NOT call prefabManager.ClearVertexPrefabs() here.
+
+        // If in the future you want a visual-only shell,
+        // you can spawn separate, tagged objects here that are NOT part of
+        // activeVertexPrefabs / activeInsiderPrefabs used as RAM.
+    }
+
+    // ---------------------------------------------------------
+    // FINAL: Refinement-aware voxel stamp integration
+    // ---------------------------------------------------------
+    public void ReceiveVoxelStamp(VoxelStamp3x9x3 stamp)
+    {
+        if (octree == null)
+            return;
+
+        Vector3 origin = stamp.origin;
+
+        // Ask refinement indicator once per stamp
+        RefinementIndicator refInd = FindObjectOfType<RefinementIndicator>();
+        bool refining = refInd != null && refInd.IsRefining;
+
+        for (int x = 0; x < 3; x++)
+        {
+            for (int y = 0; y < 3; y++)
+            {
+                for (int z = 0; z < 9; z++)
+                {
+                    if (!stamp.IsSet(x, y, z))
+                        continue;
+
+                    Vector3 localOffset = new Vector3(
+                        x - 1,
+                        y - 1,
+                        z - 4
+                    ) * (cubeSize / 3f);
+
+                    Vector3 worldPos = origin + localOffset;
+
+                    // Refinement-aware stability nudge
+                    octree.NudgeStabilityAt(worldPos, stamp.stability, refining);
+                }
+            }
+        }
+
+        RebuildLeavesAndInsidersPositions();
+    }
+
+    // ---------------------------------------------------------
+    // Export
+    // ---------------------------------------------------------
+    [ContextMenu("Export Scan To TXT")]
+    public void ExportScan()
+    {
+        if (prefabManager == null)
+        {
+            Debug.LogWarning("[BorgCubeRuntime] No prefabManager; cannot export scan.");
+            return;
+        }
+
+        string folderPath = Path.Combine(Application.persistentDataPath, exportFolder);
+        if (!Directory.Exists(folderPath))
+            Directory.CreateDirectory(folderPath);
+
+        string filePath = Path.Combine(folderPath, exportFileName);
+
+        using (StreamWriter sw = new StreamWriter(filePath, false))
+        {
+            sw.WriteLine("# Borg Cube Scan");
+            sw.WriteLine("# Insiders (local positions)");
+            foreach (var go in prefabManager.activeInsiderPrefabs)
+            {
+                if (go == null) continue;
+                Vector3 p = go.transform.localPosition;
+                sw.WriteLine($"INSIDER {p.x:F4} {p.y:F4} {p.z:F4}");
+            }
+
+            sw.WriteLine("# Vertices (local positions)");
+            foreach (var go in prefabManager.activeVertexPrefabs)
+            {
+                if (go == null) continue;
+                Vector3 p = go.transform.localPosition;
+                sw.WriteLine($"VERTEX {p.x:F4} {p.y:F4} {p.z:F4}");
+            }
+        }
+
+        Debug.Log($"[BorgCubeRuntime] Scan exported to: {filePath}");
+    }
+}
+
+===== END: BorgCubeRuntime.cs =====
+
+===== BEGIN: BorgCubeDebugger.cs =====
+using System.IO;
+using System.Text;
+using UnityEngine;
+using CVatGPT;
+
+[DisallowMultipleComponent]
+public class BorgCubeDebugger : MonoBehaviour
+{
+    [Header("References")]
+    public BorgCubeRuntime borgCube;
+
+    [Header("Logging")]
+    public string logFolder = "BorgLogs";
+    public string logFileName = "borg_state.txt";
+    public float logInterval = 0.1f;
+    private float timer = 0f;
+
+    private string filePath;
+
+    private void Awake()
+    {
+        if (borgCube == null)
+            borgCube = GetComponent<BorgCubeRuntime>();
+
+        string folderPath = Path.Combine(Application.persistentDataPath, logFolder);
+        if (!Directory.Exists(folderPath))
+            Directory.CreateDirectory(folderPath);
+
+        filePath = Path.Combine(folderPath, logFileName);
+        if (File.Exists(filePath))
+            File.Delete(filePath);
+    }
+
+    private void Update()
+    {
+        timer += Time.deltaTime;
+        if (timer < logInterval) return;
+        timer = 0f;
+
+        DumpBorgState();
+    }
+
+    private void DumpBorgState()
+    {
+        StringBuilder sb = new StringBuilder();
+        sb.AppendLine($"# BorgCube State Dump @ {Time.time:F2}s");
+
+        // 1ï¸âƒ£ Log runtime insiders and vertices if BorgCubeRuntime is assigned
+        if (borgCube != null && borgCube.prefabManager != null)
+        {
+            LogGameObjects(sb, "INSIDERS", borgCube.prefabManager.activeInsiderPrefabs, includeScale: true);
+            LogGameObjects(sb, "VERTICES", borgCube.prefabManager.activeVertexPrefabs, includeScale: false);
+        }
+
+        // 2ï¸âƒ£ Log all prefab/nested children cubes and spheres
+        LogPrefabChildren(sb);
+
+        // Keep log under ~10k chars
+        string output = sb.ToString();
+        if (output.Length > 10000)
+            output = output.Substring(0, 10000) + "\n# TRUNCATED";
+
+        File.AppendAllText(filePath, output + "\n");
+    }
+
+    private void LogGameObjects(StringBuilder sb, string label, System.Collections.Generic.List<GameObject> gos, bool includeScale)
+    {
+        if (gos == null || gos.Count == 0) return;
+
+        sb.AppendLine($"# {label} (local positions{(includeScale ? ", scale" : "")})");
+        int idx = 0;
+        foreach (var go in gos)
+        {
+            if (go == null) continue;
+            Vector3 p = go.transform.localPosition;
+            if (includeScale)
+                sb.AppendLine($"{label[0]}{idx}: {p.x:F3},{p.y:F3},{p.z:F3} | S:{go.transform.localScale.x:F2}");
+            else
+                sb.AppendLine($"{label[0]}{idx}: {p.x:F3},{p.y:F3},{p.z:F3}");
+            idx++;
+        }
+    }
+
+    private void LogPrefabChildren(StringBuilder sb)
+    {
+        sb.AppendLine("# PREFAB CHILDREN (cubes/spheres)");
+        var allChildren = GetComponentsInChildren<Transform>(true);
+
+        int idx = 0;
+        foreach (var t in allChildren)
+        {
+            if (t == this.transform) continue; // skip root
+
+            // Only cubes or spheres
+            if (t.gameObject.name.ToLower().Contains("cube") || t.gameObject.name.ToLower().Contains("sphere"))
+            {
+                Vector3 localPos = t.localPosition;
+                Vector3 localScale = t.localScale;
+                sb.AppendLine($"P{idx}: {t.gameObject.name} | {localPos.x:F3},{localPos.y:F3},{localPos.z:F3} | S:{localScale.x:F2}");
+                idx++;
+            }
+        }
+    }
+}
+
+===== END: BorgCubeDebugger.cs =====
+
+===== BEGIN: AutoWireRJOMesh.cs =====
+using UnityEngine;
+using System.Collections.Generic;
+using System.Text.RegularExpressions;
+using CVatGPT;
+
+[ExecuteAlways]
+public class AutoWireRJOMesh : MonoBehaviour
+{
+    // -----------------------------
+    // FLAGS
+    // -----------------------------
+    [Header("Auto-Wire")]
+    public bool autoWireNow = false;
+
+    // -----------------------------
+    // CORE REFERENCES (V1)
+    // -----------------------------
+    private CVatGPT.Sihouetter _sihouetter;
+    private Gomboc gomboc;
+    private MultiBeeGombocFinal gombocLattice;
+    private CVatGPTPrefabManager prefabManager;
+    private CVatGPTRjoManager rjoManager;
+    private CVatGPTManager cvManager;
+
+    // -----------------------------
+    // V2 REFERENCES
+    // -----------------------------
+    public InsiderComputer computer;
+    public MeshIntegrator integrator;
+
+    // -----------------------------
+    // RJO3x3
+    // -----------------------------
+    private RJO3x3 block;
+
+    // -----------------------------
+    void OnEnable()
+    {
+        TryRun();
+    }
+
+    void OnValidate()
+    {
+        TryRun();
+    }
+
+    void TryRun()
+    {
+        if (!autoWireNow) return;
+
+        RunAll();
+
+        autoWireNow = false;
+
+#if UNITY_EDITOR
+        if (!Application.isPlaying)
+            UnityEditor.EditorUtility.SetDirty(this);
+#endif
+    }
+
+    // =============================
+    // MASTER RUN
+    // =============================
+    public void RunAll()
+    {
+        block = GetComponent<RJO3x3>();
+
+        TryAutoWireCore();     // Original V1
+        TryWireV2();           // InsiderComputer â†” MeshIntegrator
+        TryWireRJO3x3();       // Naming-based voxel wiring
+
+        Debug.Log("[AutoWireRJOMesh] FULL auto-wire completed on " + gameObject.name);
+    }
+
+    // =============================
+    // V1 (YOUR ORIGINAL)
+    // =============================
+    void TryAutoWireCore()
+    {
+        if (_sihouetter == null)
+            _sihouetter = FindObjectOfType<CVatGPT.Sihouetter>();
+
+        if (gomboc == null)
+            gomboc = FindObjectOfType<Gomboc>();
+
+        if (gomboc != null && gombocLattice == null)
+            gombocLattice = gomboc.GetComponent<MultiBeeGombocFinal>();
+
+        if (prefabManager == null)
+            prefabManager = FindObjectOfType<CVatGPTPrefabManager>();
+
+        if (rjoManager == null)
+            rjoManager = FindObjectOfType<CVatGPTRjoManager>();
+
+        if (cvManager == null)
+            cvManager = FindObjectOfType<CVatGPTManager>();
+
+        var terrainGen      = GetComponent<RuntimeTerrainMeshGenerator>();
+        var rjoComponents   = GetComponentsInChildren<RJO>(true);
+        var protocol56Ks    = GetComponentsInChildren<Protocol56K>(true);
+        var _56Ks           = GetComponentsInChildren<_56K>(true);
+        var tx56Ks          = GetComponentsInChildren<_56KTransmitter>(true);
+        var rx56Ks          = GetComponentsInChildren<_56KReceiver>(true);
+        var voxelBees       = GetComponentsInChildren<GIBVoxelBee>(true);
+        var voxelGombocs    = GetComponentsInChildren<GIBVoxelGomboc>(true);
+        var stabilityGPU    = GetComponentsInChildren<GombocStabilityFieldGPU>(true);
+        var unifiedStability= GetComponentsInChildren<UnifiedStabilityManager>(true);
+
+        // --- Gomboc
+        if (gomboc != null)
+        {
+            if (gomboc.silhouetteReference == null && _sihouetter != null)
+                gomboc.silhouetteReference = _sihouetter;
+
+            if (gomboc.rjmManager == null)
+                gomboc.rjmManager = gomboc.GetComponent<RJM>();
+
+            foreach (var s in stabilityGPU)
+            {
+                if (s.sourceRawImage == null && _sihouetter != null)
+                    s.sourceRawImage = _sihouetter.GetComponentInChildren<UnityEngine.UI.RawImage>(true);
+            }
+        }
+
+        // --- Protocol chain
+        foreach (var p in protocol56Ks)
+        {
+            if (p.gombocLattice == null && gombocLattice != null)
+                p.gombocLattice = gombocLattice;
+        }
+
+        if (_56Ks.Length > 0)
+        {
+            var proto = protocol56Ks.Length > 0 ? protocol56Ks[0] : null;
+            var tx    = tx56Ks.Length > 0 ? tx56Ks[0] : null;
+            var rx    = rx56Ks.Length > 0 ? rx56Ks[0] : null;
+
+            foreach (var m in _56Ks)
+            {
+                if (m.transmitter == null && tx != null) m.transmitter = tx;
+                if (m.receiver   == null && rx != null) m.receiver   = rx;
+                if (m.protocol   == null && proto != null) m.protocol = proto;
+            }
+        }
+
+        // ============================================================
+        // --- Voxels (UPDATED FOR FOLDER-DRIVEN GIBVoxelBee)
+        // ============================================================
+        foreach (var vb in voxelBees)
+        {
+            if (vb.voxelFolders == null || vb.voxelFolders.Count == 0)
+            {
+                vb.voxelFolders = new List<Transform>();
+
+                Transform vox = transform.Find("Voxels");
+                if (vox != null)
+                    vb.voxelFolders.Add(vox);
+                else
+                    vb.voxelFolders.Add(transform);
+            }
+
+            if (vb.morseAlphabet == null)
+                vb.morseAlphabet = vb.GetComponent<ABC>();
+
+            if (vb.mathModule == null)
+                vb.mathModule = vb.GetComponent<_123>();
+        }
+
+        foreach (var vg in voxelGombocs)
+        {
+            if (vg.voxelFolders == null || vg.voxelFolders.Count == 0)
+            {
+                vg.voxelFolders = new List<Transform>();
+
+                Transform vox = transform.Find("Voxels");
+                if (vox != null)
+                    vg.voxelFolders.Add(vox);
+                else
+                    vg.voxelFolders.Add(transform);
+            }
+
+            if (vg.morseAlphabet == null)
+                vg.morseAlphabet = vg.GetComponent<ABC>();
+
+            if (vg.mathModule == null)
+                vg.mathModule = vg.GetComponent<_123>();
+        }
+
+        // --- RJO Manager
+        foreach (var r in rjoComponents)
+        {
+            if (r.rjoManager == null && rjoManager != null)
+                r.rjoManager = rjoManager;
+        }
+
+        // --- Terrain
+        if (terrainGen != null)
+        {
+            if (terrainGen.MeshFilter.sharedMesh == null)
+                terrainGen.MeshFilter.sharedMesh = GetComponent<MeshFilter>().sharedMesh;
+
+            if (terrainGen.MeshRenderer.sharedMaterial == null)
+                terrainGen.MeshRenderer.sharedMaterial = GetComponent<MeshRenderer>().sharedMaterial;
+
+            if (terrainGen.meshTarget == null)
+                terrainGen.meshTarget = gameObject;
+        }
+    }
+
+    // =============================
+    // V2 MERGE
+    // =============================
+    void TryWireV2()
+    {
+        if (computer == null)
+            computer = GetComponentInChildren<InsiderComputer>();
+
+        if (integrator == null)
+            integrator = GetComponentInChildren<MeshIntegrator>();
+
+        if (computer != null && integrator != null)
+        {
+            integrator.computer = computer;
+        }
+    }
+
+    // =============================
+    // RJO3x3 MERGE
+    // =============================
+    void TryWireRJO3x3()
+    {
+        if (block == null) return;
+
+        AssignInsiders();
+        AssignVertices();
+        WireVertexHands();
+    }
+
+    void AssignInsiders()
+    {
+        Transform container = transform.Find("InsiderVoxels");
+        if (container == null) return;
+
+        var list = new List<iIix3>();
+
+        foreach (Transform child in container)
+        {
+            var ii = child.GetComponent<iIix3>();
+            if (ii == null) continue;
+
+            ParseInsiderName(child.name, ii);
+            list.Add(ii);
+        }
+
+        block.insiders = list.ToArray();
+    }
+
+    void ParseInsiderName(string name, iIix3 ii)
+    {
+        var match = Regex.Match(name, @"(\d+)_(\d+)_(\d+)");
+        if (!match.Success) return;
+
+        ii.ix = int.Parse(match.Groups[1].Value);
+        ii.iy = int.Parse(match.Groups[2].Value);
+        ii.iz = int.Parse(match.Groups[3].Value);
+    }
+
+    void AssignVertices()
+    {
+        Transform container = transform.Find("CubeCorners");
+        if (container == null) return;
+
+        Transform[] verts = new Transform[9];
+
+        foreach (Transform child in container)
+        {
+            Vector2Int coord = ParseVertexName(child.name);
+            int index = coord.y * 3 + coord.x;
+
+            if (index >= 0 && index < 9)
+                verts[index] = child;
+        }
+
+        block.vertices = verts;
+    }
+
+    Vector2Int ParseVertexName(string name)
+    {
+        var match = Regex.Match(name, @"(\d+)_(\d+)_(\d+)");
+        if (!match.Success) return Vector2Int.zero;
+
+        int x = int.Parse(match.Groups[1].Value);
+        int z = int.Parse(match.Groups[3].Value);
+
+        return new Vector2Int(x, z);
+    }
+
+    void WireVertexHands()
+    {
+        if (block.vertices == null || block.insiders == null)
+            return;
+
+        foreach (var ii in block.insiders)
+        {
+            if (ii == null) continue;
+
+            int index = ii.iz * 3 + ii.ix;
+            if (index < 0 || index >= block.vertices.Length)
+                continue;
+
+            Transform v = block.vertices[index];
+
+            ii.vertexHand = v;
+
+            Vector3 topPos = v.position + Vector3.up * block.verticalStep * (ii.iy + 1);
+
+            ii.transform.position = topPos;
+            ii.transform.SetParent(v);
+        }
+    }
+}
+
+===== END: AutoWireRJOMesh.cs =====
+
+===== BEGIN: RJO3x3.cs =====
+using UnityEngine;
+using System.Collections.Generic;
+
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+
+public class RJO3x3 : MonoBehaviour
+{
+    // ---------------------------------------------------------
+    // Manual wiring for vertical stack (Y axis)
+    // ---------------------------------------------------------
+    [Header("Vertical Wiring (Y axis: bottom/middle/top)")]
+    public RJO3x3 below;
+    public RJO3x3 sameLevel;
+    public RJO3x3 above;
+
+    [HideInInspector] public int verticalLayer = -1;
+
+    // ---------------------------------------------------------
+    // Manual wiring for forward stack (Z axis)
+    // ---------------------------------------------------------
+    [Header("Forward Wiring (Z axis: here/near/far)")]
+    public RJO3x3 here;
+    public RJO3x3 near;
+    public RJO3x3 far;
+
+    [HideInInspector] public int depthLayer = -1;
+
+    // ---------------------------------------------------------
+    // Existing fields
+    // ---------------------------------------------------------
+    [Header("Autoâ€‘populate folders")]
+    public Transform vertexFolder;
+    public Transform insiderFolder;
+
+    [Header("Vertices (row-major: z then x)")]
+    public Transform[] vertices;
+
+    [Header("Insiders belonging to this block")]
+    public iIix3[] insiders;
+
+    [Header("Stamp source")]
+    public MapStamper horizontalStamper;
+
+    [Header("Vertical mask [x,z,y]")]
+    public bool[,,] verticalMask;
+
+    [Header("Block grid location (XZ world grid)")]
+    public int blockX;
+    public int blockZ;
+
+    [Header("Grid scale")]
+    public float cellSize = 1f;
+    public float verticalStep = 1f;
+
+    [Header("Optional top offset for vertexHands")]
+    public float handOffsetY = 0.01f;
+
+    [Header("Which vertical slice to visualize (0=bottom,1=middle,2=top)")]
+    [Range(0, 2)] public int sliceLayer = 0;
+
+    // ---------------------------------------------------------
+    // Initialization
+    // ---------------------------------------------------------
+    private void Awake()
+    {
+        DetermineVerticalLayer();
+        DetermineDepthLayer();
+    }
+
+    private void OnEnable()
+    {
+        if (horizontalStamper != null)
+            horizontalStamper.OnStampGenerated += HandleStamp;
+    }
+
+    private void OnDisable()
+    {
+        if (horizontalStamper != null)
+            horizontalStamper.OnStampGenerated -= HandleStamp;
+    }
+
+    private void HandleStamp(MapStampData stamp)
+    {
+        AlignToHorizontalStamp(stamp);
+        ApplyVerticalStamp();
+    }
+
+    // ---------------------------------------------------------
+    // Determine vertical layer (Y)
+    // ---------------------------------------------------------
+    private void DetermineVerticalLayer()
+    {
+        if (below == null && above != null) verticalLayer = 0;
+        else if (below != null && above != null) verticalLayer = 1;
+        else if (below != null && above == null) verticalLayer = 2;
+        else verticalLayer = 1;
+    }
+
+    // ---------------------------------------------------------
+    // Determine depth layer (Z)
+    // ---------------------------------------------------------
+    private void DetermineDepthLayer()
+    {
+        if (here == null && near != null) depthLayer = 0;
+        else if (here != null && far != null) depthLayer = 1;
+        else if (near != null && far == null) depthLayer = 2;
+        else depthLayer = 1;
+    }
+
+    // ---------------------------------------------------------
+    // AutoWire
+    // ---------------------------------------------------------
+    public void AutoWire()
+    {
+        if (insiderFolder != null)
+            insiders = insiderFolder.GetComponentsInChildren<iIix3>(true);
+        else
+            insiders = new iIix3[0];
+
+        List<Transform> verts = new List<Transform>();
+
+        if (vertexFolder != null)
+        {
+            foreach (Transform child in vertexFolder.GetComponentsInChildren<Transform>(true))
+            {
+                if (child == vertexFolder) continue;
+                if (child.GetComponent<iIix3>() != null) continue;
+                verts.Add(child);
+            }
+        }
+
+        verts.Sort((a, b) =>
+        {
+            if (Mathf.Approximately(a.localPosition.z, b.localPosition.z))
+                return a.localPosition.x.CompareTo(b.localPosition.x);
+            return a.localPosition.z.CompareTo(b.localPosition.z);
+        });
+
+        vertices = verts.ToArray();
+        AutoAssignVertexHands();
+    }
+
+    private void AutoAssignVertexHands()
+    {
+        if (vertices == null || vertices.Length != 9 || insiders == null)
+            return;
+
+        foreach (var ii in insiders)
+        {
+            if (ii == null) continue;
+
+            int index = ii.iz * 3 + ii.ix;
+            if (index >= 0 && index < vertices.Length)
+            {
+                ii.vertexHand = vertices[index];
+                if (ii.vertexHand != null)
+                    ii.vertexHand.position += Vector3.up * handOffsetY;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------
+    // Placement using verticalLayer + depthLayer
+    // ---------------------------------------------------------
+    public void AlignToHorizontalStamp(MapStampData stamp)
+    {
+        if (horizontalStamper == null) return;
+        var pose = horizontalStamper.poseTracker;
+        if (pose == null) return;
+
+        float blockSize = 3f * cellSize;
+
+        Vector3 worldPos = new Vector3(
+            pose.ChunkX * MapStamperChunkWorldSize() + blockX * blockSize,
+            verticalLayer * verticalStep,
+            pose.ChunkZ * MapStamperChunkWorldSize() + blockZ * blockSize
+        );
+
+        worldPos.z += depthLayer * (3f * cellSize);
+
+        transform.position = worldPos;
+
+        if (vertices != null && vertices.Length == 9)
+        {
+            int i = 0;
+            for (int z = 0; z < 3; z++)
+            for (int x = 0; x < 3; x++)
+            {
+                if (vertices[i] != null)
+                    vertices[i].position = transform.position + new Vector3(x * cellSize, 0f, z * cellSize);
+                i++;
+            }
+        }
+    }
+
+    private float MapStamperChunkWorldSize() => 9f * cellSize;
+
+    // ---------------------------------------------------------
+    // Vertical voxel activation
+    // ---------------------------------------------------------
+    public void ApplyVerticalStamp()
+    {
+        if (verticalMask == null || insiders == null)
+            return;
+
+        foreach (var ii in insiders)
+        {
+            if (ii == null) continue;
+
+            bool active = false;
+
+            if (ii.ix >= 0 && ii.ix < 3 &&
+                ii.iz >= 0 && ii.iz < 3 &&
+                ii.iy >= 0 && ii.iy < 3)
+            {
+                active = verticalMask[ii.ix, ii.iz, ii.iy];
+            }
+
+            ii.gameObject.SetActive(active);
+
+            if (active)
+            {
+                Vector3 local = new Vector3(ii.ix * cellSize, ii.iy * verticalStep, ii.iz * cellSize);
+                ii.transform.position = transform.position + local;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------
+    // Gizmos â€” NOW OFFSET BY -(sliceLayer+1)
+    // ---------------------------------------------------------
+    private void OnDrawGizmos()
+    {
+        float s = cellSize;
+        float h = verticalStep;
+
+        Vector3 corner = transform.position;
+
+        // NEW: 0â†’â€“1, 1â†’â€“2, 2â†’â€“3
+        Vector3 gizmoOffset = new Vector3(0f, -(sliceLayer + 1) * h, 0f);
+
+        // Draw 3x3x3 grid
+        for (int y = 0; y < 3; y++)
+        for (int z = 0; z < 3; z++)
+        for (int x = 0; x < 3; x++)
+        {
+            Vector3 p = corner + gizmoOffset +
+                        new Vector3(x * s + s * 0.5f,
+                                    y * h + h * 0.5f,
+                                    z * s + s * 0.5f);
+
+            Gizmos.color = new Color(1f, 1f, 1f, 0.08f);
+            Gizmos.DrawWireCube(p, new Vector3(s, h, s));
+        }
+
+        if (insiders == null) return;
+
+        foreach (var ii in insiders)
+        {
+            if (ii == null) continue;
+            if (ii.iy != sliceLayer) continue;
+
+            Vector3 expectedPos =
+                corner + gizmoOffset +
+                new Vector3(ii.ix * s + s * 0.5f,
+                            ii.iy * h + h * 0.5f,
+                            ii.iz * s + s * 0.5f);
+
+            Gizmos.color = SliceColor(ii.iy);
+            Gizmos.DrawSphere(expectedPos, 0.08f);
+
+            Gizmos.color = Color.yellow;
+            Gizmos.DrawLine(expectedPos, ii.transform.position);
+
+#if UNITY_EDITOR
+            Handles.Label(expectedPos + Vector3.up * 0.1f, $"{ii.ix},{ii.iy},{ii.iz}");
+#endif
+        }
+    }
+
+    private Color SliceColor(int y)
+    {
+        return y switch
+        {
+            0 => Color.blue,
+            1 => Color.green,
+            2 => Color.red,
+            _ => Color.white
+        };
+    }
+}
+
+#if UNITY_EDITOR
+[CustomEditor(typeof(RJO3x3))]
+public class RJO3x3Editor : Editor
+{
+    public override void OnInspectorGUI()
+    {
+        DrawDefaultInspector();
+
+        RJO3x3 slice = (RJO3x3)target;
+
+        GUILayout.Space(10);
+
+        if (GUILayout.Button("Force AutoWire Now"))
+            slice.AutoWire();
+    }
+}
+#endif
+
+===== END: RJO3x3.cs =====
+
+===== BEGIN: MeshGen_VertexAuthority.cs =====
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+
+[RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
+public class MeshGen_VertexAuthority : MonoBehaviour
+{
+    public static MeshGen_VertexAuthority Instance { get; private set; }
+
+    [Header("Vertex Source Folder")]
+    public string vertexRootFolder = "Assets/World/Mesh";
+
+    [Header("Generation")]
+    public bool rebuildOnStart = true;
+    public bool verboseLogging = false;
+
+    private MeshFilter meshFilter;
+
+    private const float EPSILON = 0.0001f;
+
+    // =========================================================
+    // LIFECYCLE
+    // =========================================================
+
+    private void Awake()
+    {
+        if (Instance != null && Instance != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
+
+        Instance = this;
+        meshFilter = GetComponent<MeshFilter>();
+    }
+
+    private void Start()
+    {
+        if (rebuildOnStart)
+            RebuildMesh();
+    }
+
+    // =========================================================
+    // PUBLIC API
+    // =========================================================
+
+    public void RebuildMesh()
+    {
+#if UNITY_EDITOR
+        var sources = LoadMeshSourcesDeterministic(vertexRootFolder);
+        BuildCombinedMesh(sources);
+#else
+        Debug.LogWarning("[MeshGen] Runtime loading not supported.");
+#endif
+    }
+
+    // =========================================================
+    // LOAD (CORRECT + DETERMINISTIC)
+    // =========================================================
+
+#if UNITY_EDITOR
+    private List<(Mesh mesh, Matrix4x4 matrix)> LoadMeshSourcesDeterministic(string rootFolder)
+    {
+        var results = new List<(Mesh, Matrix4x4)>();
+
+        string[] guids = AssetDatabase.FindAssets("t:Mesh t:Prefab", new[] { rootFolder });
+        Array.Sort(guids, StringComparer.Ordinal);
+
+        foreach (string guid in guids)
+        {
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+
+            // --- Direct mesh asset ---
+            var mesh = AssetDatabase.LoadAssetAtPath<Mesh>(path);
+            if (mesh != null)
+            {
+                results.Add((mesh, Matrix4x4.identity));
+                continue;
+            }
+
+            // --- Prefab ---
+            var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+            if (prefab != null)
+            {
+                var rootMatrix = Matrix4x4.identity;
+
+                var mfs = prefab.GetComponentsInChildren<MeshFilter>(true);
+                foreach (var mf in mfs)
+                {
+                    if (mf.sharedMesh == null) continue;
+
+                    // CRITICAL FIX: build matrix relative to prefab root
+                    Matrix4x4 localMatrix = mf.transform.localToWorldMatrix;
+                    Matrix4x4 finalMatrix = rootMatrix * localMatrix;
+
+                    results.Add((mf.sharedMesh, finalMatrix));
+                }
+            }
+        }
+
+        Log($"Loaded sources: {results.Count}");
+        return results;
+    }
+#endif
+
+    // =========================================================
+    // BUILD (CORRECT SPACE PIPELINE)
+    // =========================================================
+
+    private void BuildCombinedMesh(List<(Mesh mesh, Matrix4x4 matrix)> sources)
+    {
+        if (sources == null || sources.Count == 0)
+        {
+            Log("No sources.");
+            return;
+        }
+
+        var vertices = new List<Vector3>();
+        var triangles = new List<int>();
+        var normals = new List<Vector3>();
+        var uvs = new List<Vector2>();
+
+        var lookup = new Dictionary<Vector3, int>(new EpsilonComparer());
+
+        foreach (var (mesh, matrix) in sources)
+        {
+            if (mesh == null) continue;
+
+            var srcVerts = mesh.vertices;
+            var srcTris = mesh.triangles;
+            var srcNormals = mesh.normals;
+            var srcUVs = mesh.uv;
+
+            for (int i = 0; i < srcTris.Length; i++)
+            {
+                int idx = srcTris[i];
+
+                Vector3 world = matrix.MultiplyPoint3x4(srcVerts[idx]);
+
+                Vector3 canonical = CanonicalizeVertex(world);
+
+                Vector3 local = transform.InverseTransformPoint(canonical);
+
+                if (!lookup.TryGetValue(local, out int existing))
+                {
+                    existing = vertices.Count;
+                    lookup[local] = existing;
+
+                    vertices.Add(local);
+
+                    // FIX: proper normal transform
+                    Vector3 normal =
+                        (srcNormals != null && srcNormals.Length > idx)
+                        ? matrix.MultiplyVector(srcNormals[idx]).normalized
+                        : Vector3.up;
+
+                    normals.Add(normal);
+
+                    uvs.Add(
+                        (srcUVs != null && srcUVs.Length > idx)
+                        ? srcUVs[idx]
+                        : Vector2.zero
+                    );
+                }
+
+                triangles.Add(existing);
+            }
+        }
+
+        Mesh combined = new Mesh();
+        combined.name = "MeshGen_VertexAuthority_Combined";
+
+        combined.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+
+        combined.Clear(); // CRITICAL FIX
+
+        combined.SetVertices(vertices);
+        combined.SetTriangles(triangles, 0);
+        combined.SetNormals(normals);
+        combined.SetUVs(0, uvs);
+
+        combined.RecalculateBounds();
+        combined.RecalculateTangents();
+
+        meshFilter.sharedMesh = combined;
+
+        Log($"FINAL â†’ V:{vertices.Count} T:{triangles.Count / 3}");
+    }
+
+    // =========================================================
+    // SLAM CANONICALIZATION (STABLE)
+    // =========================================================
+
+    private Vector3 CanonicalizeVertex(Vector3 world)
+    {
+        if (SLAM_Authority.Instance == null)
+            return world;
+
+        var slam = SLAM_Authority.Instance;
+
+        Vector3 logical = world + slam.AccumulatedOriginOffset;
+
+        var chunk = slam.GetChunkId(logical);
+        var cube = slam.GetCubeId(logical);
+        var rat = slam.GetRatId(logical);
+
+        Vector3 snapped = slam.SnapToCubeGrid(logical);
+
+        float hash = DeterministicHash(chunk, cube, rat);
+
+        return snapped + Vector3.one * hash * 0.00001f;
+    }
+
+    private float DeterministicHash(
+        SLAM_Authority.ChunkId c,
+        SLAM_Authority.CubeId b,
+        SLAM_Authority.RatId r)
+    {
+        unchecked
+        {
+            int h = 17;
+
+            h = h * 31 + c.x; h = h * 31 + c.y; h = h * 31 + c.z;
+            h = h * 31 + b.x; h = h * 31 + b.y; h = h * 31 + b.z;
+            h = h * 31 + r.x; h = h * 31 + r.y; h = h * 31 + r.z;
+
+            h &= 0x7fffffff;
+
+            return h / (float)int.MaxValue;
+        }
+    }
+
+    // =========================================================
+    // LOG
+    // =========================================================
+
+    private void Log(string msg)
+    {
+        if (verboseLogging)
+            Debug.Log("[MeshGen] " + msg);
+    }
+
+    // =========================================================
+    // EPSILON COMPARER (STABLE)
+    // =========================================================
+
+    private class EpsilonComparer : IEqualityComparer<Vector3>
+    {
+        public bool Equals(Vector3 a, Vector3 b)
+        {
+            return (a - b).sqrMagnitude < EPSILON * EPSILON;
+        }
+
+        public int GetHashCode(Vector3 v)
+        {
+            int x = Mathf.RoundToInt(v.x / EPSILON);
+            int y = Mathf.RoundToInt(v.y / EPSILON);
+            int z = Mathf.RoundToInt(v.z / EPSILON);
+
+            unchecked
+            {
+                int h = 17;
+                h = h * 31 + x;
+                h = h * 31 + y;
+                h = h * 31 + z;
+                return h;
+            }
+        }
+    }
+}
+
+===== END: MeshGen_VertexAuthority.cs =====
+
+===== BEGIN: CVatGPTPrefabManager.cs =====
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace CVatGPT
+{
+    [DisallowMultipleComponent]
+    public partial class CVatGPTPrefabManager : MonoBehaviour
+    {
+        // ============================================================
+        // FOLDERâ€‘DRIVEN SOURCES (INTELLIGENCE ENGINE)
+        // ============================================================
+        [Header("Autoâ€‘Populate Folders")]
+        public List<Transform> vertexFolders = new List<Transform>();
+        public List<Transform> insiderFolders = new List<Transform>();
+
+        [Header("Compatibility")]
+        public float insiderScale = 1f;
+
+        // ============================================================
+        // RUNTIME COLLECTIONS (RAM â€” NEVER DESTROYED)
+        // ============================================================
+        public List<GameObject> activeVertexPrefabs = new List<GameObject>();
+        public List<GameObject> activeInsiderPrefabs = new List<GameObject>();
+
+        // Backwardâ€‘compat aliases
+        public List<GameObject> spawnedVertexPrefabs => activeVertexPrefabs;
+        public List<GameObject> spawnedInsiders => activeInsiderPrefabs;
+
+        // ============================================================
+        // PREFAB COMPATIBILITY SHIMS (SAFE)
+        // ============================================================
+        public GameObject vertexPrefab =>
+            activeVertexPrefabs != null && activeVertexPrefabs.Count > 0
+                ? activeVertexPrefabs[0]
+                : null;
+
+        public GameObject insiderPrefab =>
+            activeInsiderPrefabs != null && activeInsiderPrefabs.Count > 0
+                ? activeInsiderPrefabs[0]
+                : null;
+
+        // ============================================================
+        // INIT â€” PURE GATHERING
+        // ============================================================
+        void Awake()
+        {
+            AutoPopulateVertices();
+            AutoPopulateInsiders();
+        }
+
+        // ============================================================
+        // AUTOâ€‘POPULATION â€” VERTICES (GATHER ONLY)
+        // ============================================================
+        void AutoPopulateVertices()
+        {
+            activeVertexPrefabs.Clear();
+
+            if (vertexFolders == null || vertexFolders.Count == 0)
+            {
+                Debug.LogWarning("[CVatGPTPrefabManager] No vertex folders assigned.");
+                return;
+            }
+
+            foreach (Transform folder in vertexFolders)
+                CollectPrefabsRecursive(folder, activeVertexPrefabs);
+
+            SortDeterministically(activeVertexPrefabs);
+
+            Debug.Log($"[CVatGPTPrefabManager] Gathered {activeVertexPrefabs.Count} vertex RAM objects.");
+        }
+
+        // ============================================================
+        // AUTOâ€‘POPULATION â€” INSIDERS (GATHER ONLY)
+        // ============================================================
+        void AutoPopulateInsiders()
+        {
+            activeInsiderPrefabs.Clear();
+
+            if (insiderFolders == null || insiderFolders.Count == 0)
+            {
+                Debug.LogWarning("[CVatGPTPrefabManager] No insider folders assigned.");
+                return;
+            }
+
+            foreach (Transform folder in insiderFolders)
+                CollectPrefabsRecursive(folder, activeInsiderPrefabs);
+
+            SortDeterministically(activeInsiderPrefabs);
+
+            Debug.Log($"[CVatGPTPrefabManager] Gathered {activeInsiderPrefabs.Count} insider RAM objects.");
+        }
+
+        // ============================================================
+        // RECURSIVE COLLECTOR (SAFE)
+        // ============================================================
+        void CollectPrefabsRecursive(Transform root, List<GameObject> list)
+        {
+            foreach (Transform child in root)
+            {
+                if (child.GetComponent<Renderer>() != null)
+                    list.Add(child.gameObject);
+
+                CollectPrefabsRecursive(child, list);
+            }
+        }
+
+        // ============================================================
+        // DETERMINISTIC SORTING
+        // ============================================================
+        void SortDeterministically(List<GameObject> list)
+        {
+            list.Sort((a, b) =>
+            {
+                int n = string.CompareOrdinal(a.name, b.name);
+                if (n != 0) return n;
+                return a.transform.GetSiblingIndex().CompareTo(b.transform.GetSiblingIndex());
+            });
+        }
+
+        // ============================================================
+        // SPAWNERS â€” DISABLED FOR INTELLIGENCE ENGINE
+        // ============================================================
+        public GameObject SpawnVertexPrefab(Vector3 localPos)
+        {
+            Debug.LogWarning("[CVatGPTPrefabManager] SpawnVertexPrefab called â€” ignored (intelligence engine vertices are static).");
+            return null;
+        }
+
+        public GameObject SpawnInsiderPrefab(Vector3 localPos)
+        {
+            Debug.LogWarning("[CVatGPTPrefabManager] SpawnInsiderPrefab called â€” ignored (intelligence engine insiders are static).");
+            return null;
+        }
+
+        // ============================================================
+        // COMPAT: INSTANTIATE PREFAB SAFELY (REQUIRED BY SERIALIZATION)
+        // ============================================================
+        public GameObject InstantiatePrefabSafely(GameObject prefab, Transform parent)
+        {
+            if (prefab == null)
+            {
+                Debug.LogError("[CVatGPTPrefabManager] InstantiatePrefabSafely called with null prefab.");
+                return null;
+            }
+
+            // This is ONLY for serialization compatibility.
+            // It instantiates a copy WITHOUT touching intelligence engine RAM.
+            GameObject go = Instantiate(prefab, parent);
+
+            // Maintain insider scaling rules
+            if (prefab == insiderPrefab)
+                go.transform.localScale = Vector3.one * insiderScale;
+
+            return go;
+        }
+
+        // ============================================================
+        // CLEARERS â€” NOW NONâ€‘DESTRUCTIVE
+        // ============================================================
+        public void ClearVertexPrefabs()
+        {
+            activeVertexPrefabs.Clear();
+        }
+
+        public void ClearInsiderPrefabs()
+        {
+            activeInsiderPrefabs.Clear();
+        }
+
+        public void ClearSpawnedObjects()
+        {
+            activeVertexPrefabs.Clear();
+            activeInsiderPrefabs.Clear();
+        }
+
+        // ============================================================
+        // SERIALIZATION SUPPORT (UNCHANGED)
+        // ============================================================
+        public List<Vector3> GetSpawnedVertexLocalPositions()
+        {
+            List<Vector3> list = new();
+            foreach (var go in activeVertexPrefabs)
+                if (go != null) list.Add(go.transform.localPosition);
+            return list;
+        }
+
+        public List<Vector3> GetSpawnedInsiderLocalPositions()
+        {
+            List<Vector3> list = new();
+            foreach (var go in activeInsiderPrefabs)
+                if (go != null) list.Add(go.transform.localPosition);
+            return list;
+        }
+    }
+}
+
+===== END: CVatGPTPrefabManager.cs =====
+
+===== BEGIN: iIix3AutoWirer.cs =====
+using UnityEngine;
+using System.Collections.Generic;
+using System.Linq;
+
+public class iIix3AutoWirer : MonoBehaviour
+{
+    [Header("Assign the 9 parent GameObjects (each contains insiders)")]
+    public Transform[] insiderParents = new Transform[9];
+
+    [Header("Auto-collected insiders (do not edit manually)")]
+    public iIix3[] insiders;
+
+    [Header("Assign the 9 Corner parents (each contains vertex hands)")]
+    public Transform[] vertexHandParents = new Transform[9];
+
+    [Header("Auto-collected vertex hands (do not edit manually)")]
+    public Transform[] vertexHands;
+
+    [Header("Debug")]
+    public bool log = false;
+    public bool drawGizmos = false;
+
+    private List<(Vector3 from, Vector3 to)> debugLinks = new List<(Vector3, Vector3)>();
+
+    // ---------------------------------------------------------
+    // 1. POPULATE INSIDERS
+    // ---------------------------------------------------------
+    public void PopulateInsiders()
+    {
+        List<iIix3> list = new List<iIix3>();
+
+        foreach (var parent in insiderParents)
+        {
+            if (parent == null) continue;
+
+            var found = parent.GetComponentsInChildren<iIix3>(true);
+            list.AddRange(found);
+        }
+
+        insiders = list
+            .OrderBy(ii => ii.iy)
+            .ThenBy(ii => ii.iz)
+            .ThenBy(ii => ii.ix)
+            .ToArray();
+
+        if (log)
+            Debug.Log($"[iIix3AutoWirer] Found {insiders.Length} insiders.");
+    }
+
+    // ---------------------------------------------------------
+    // 2. POPULATE VERTEX HANDS  (RESTORED)
+    // ---------------------------------------------------------
+    public void PopulateVertexHands()
+    {
+        List<Transform> list = new List<Transform>();
+
+        foreach (var parent in vertexHandParents)
+        {
+            if (parent == null) continue;
+
+            var found = parent.GetComponentsInChildren<Transform>(true)
+                              .Where(t => t != parent)
+                              .ToArray();
+
+            list.AddRange(found);
+        }
+
+        vertexHands = list.ToArray();
+
+        if (log)
+            Debug.Log($"[iIix3AutoWirer] Found {vertexHands.Length} vertex hands.");
+    }
+
+    // ---------------------------------------------------------
+    // 3. AUTO-WIRE (slice-local only)
+    // ---------------------------------------------------------
+    public void AutoWire()
+    {
+        debugLinks.Clear();
+
+        if (insiders == null || insiders.Length == 0)
+        {
+            Debug.LogWarning("[iIix3AutoWirer] No insiders populated.");
+            return;
+        }
+
+        if (vertexHands == null || vertexHands.Length == 0)
+        {
+            Debug.LogWarning("[iIix3AutoWirer] No vertex hands populated.");
+            return;
+        }
+
+        foreach (var insider in insiders)
+        {
+            if (insider == null) continue;
+
+            // Slice parent (GameObject that contains Insider + Corner)
+            Transform sliceParent = insider.transform.parent.parent;
+
+            // Find Corner folder (Corner or Corner (1))
+            Transform cornerFolder =
+                sliceParent.Find("Corner") ??
+                sliceParent.Find("Corner (1)");
+
+            if (cornerFolder == null)
+            {
+                Debug.LogWarning($"[iIix3AutoWirer] No Corner folder found for slice {sliceParent.name}");
+                continue;
+            }
+
+            // Collect ONLY vertex hands inside THIS slice
+            var localVertexHands = cornerFolder.GetComponentsInChildren<Transform>(true)
+                                               .Where(t => t != cornerFolder)
+                                               .ToArray();
+
+            if (localVertexHands.Length == 0)
+            {
+                Debug.LogWarning($"[iIix3AutoWirer] No vertex hands inside {cornerFolder.name}");
+                continue;
+            }
+
+            // Find nearest vertex INSIDE THIS SLICE ONLY
+            Transform bestHand = null;
+            float bestDist = float.MaxValue;
+
+            Vector3 insiderPos = insider.transform.position;
+
+            foreach (var hand in localVertexHands)
+            {
+                float d = Vector3.Distance(insiderPos, hand.position);
+                if (d < bestDist)
+                {
+                    bestDist = d;
+                    bestHand = hand;
+                }
+            }
+
+            insider.vertexHand = bestHand;
+
+            if (log)
+                Debug.Log($"[iIix3AutoWirer] Insider {insider.name} â†’ {bestHand.name}");
+
+            if (drawGizmos)
+                debugLinks.Add((insider.transform.position, bestHand.position));
+        }
+    }
+
+    private void OnDrawGizmosSelected()
+    {
+        if (!drawGizmos || debugLinks == null) return;
+
+        Gizmos.color = Color.cyan;
+        foreach (var link in debugLinks)
+        {
+            Gizmos.DrawLine(link.from, link.to);
+        }
+    }
+}
+
+===== END: iIix3AutoWirer.cs =====
+
+===== BEGIN: WorldPipeline_Bootstrap.cs =====
+using System.Collections;
+using UnityEngine;
+
+/// <summary>
+/// WorldPipeline_Bootstrap (FIXED)
+/// Deterministic pipeline orchestrator
+/// </summary>
+public class WorldPipeline_Bootstrap : MonoBehaviour
+{
+    [Header("References")]
+    public SLAM_Authority slamAuthority;
+    public WorldHull_Manager worldHullManager;
+    public MeshGen_VertexAuthority meshGenVertexAuthority;
+
+    private bool slamReady;
+    private bool hullReady;
+    private bool meshReady;
+
+    private bool rebuildQueued;
+
+    private void Awake()
+    {
+        ResolveReferences();
+    }
+
+    private void Start()
+    {
+        // CRITICAL: run after all Start() calls
+        StartCoroutine(BootstrapRoutine());
+    }
+
+    // =========================================================
+    // BOOTSTRAP (DETERMINISTIC ORDER)
+    // =========================================================
+
+    private IEnumerator BootstrapRoutine()
+    {
+        // Wait one frame so SLAM + others initialize
+        yield return null;
+
+        InitializeSLAM();
+
+        yield return null;
+
+        InitializeHull();
+
+        yield return null;
+
+        InitializeMesh();
+
+        WireEvents();
+    }
+
+    // =========================================================
+    // RESOLVE
+    // =========================================================
+
+    private void ResolveReferences()
+    {
+        if (slamAuthority == null)
+            slamAuthority = FindFirstObjectByType<SLAM_Authority>();
+
+        if (worldHullManager == null)
+            worldHullManager = FindFirstObjectByType<WorldHull_Manager>();
+
+        if (meshGenVertexAuthority == null)
+            meshGenVertexAuthority = FindFirstObjectByType<MeshGen_VertexAuthority>();
+    }
+
+    // =========================================================
+    // INIT STAGES
+    // =========================================================
+
+    private void InitializeSLAM()
+    {
+        if (slamAuthority == null)
+        {
+            Debug.LogWarning("[Pipeline] SLAM missing.");
+            return;
+        }
+
+        slamReady = true;
+    }
+
+    private void InitializeHull()
+    {
+        if (worldHullManager == null)
+            return;
+
+        if (worldHullManager.hullParent == null)
+            worldHullManager.hullParent = worldHullManager.transform;
+
+        worldHullManager.RebuildHull();
+        hullReady = true;
+    }
+
+    private void InitializeMesh()
+    {
+        if (meshGenVertexAuthority == null)
+            return;
+
+        meshGenVertexAuthority.RebuildMesh();
+        meshReady = true;
+    }
+
+    // =========================================================
+    // EVENTS (FIXED)
+    // =========================================================
+
+    private void WireEvents()
+    {
+        if (slamAuthority == null)
+            return;
+
+        slamAuthority.OnOriginShifted.AddListener(HandleOriginShifted);
+        slamAuthority.OnChunkChanged.AddListener(HandleChunkChanged);
+    }
+
+    private void OnDestroy()
+    {
+        if (slamAuthority == null)
+            return;
+
+        slamAuthority.OnOriginShifted.RemoveListener(HandleOriginShifted);
+        slamAuthority.OnChunkChanged.RemoveListener(HandleChunkChanged);
+    }
+
+    // =========================================================
+    // EVENT HANDLERS (FIXED)
+    // =========================================================
+
+    private void HandleOriginShifted(Vector3 delta)
+    {
+        if (worldHullManager != null && worldHullManager.hullParent != null)
+        {
+            worldHullManager.hullParent.position += delta;
+        }
+
+        QueueMeshRebuild();
+    }
+
+    private void HandleChunkChanged(SLAM_Authority.ChunkId chunk)
+    {
+        QueueMeshRebuild();
+    }
+
+    // =========================================================
+    // REBUILD CONTROL (ANTI-SPAM)
+    // =========================================================
+
+    private void QueueMeshRebuild()
+    {
+        if (rebuildQueued) return;
+
+        rebuildQueued = true;
+        StartCoroutine(RebuildNextFrame());
+    }
+
+    private IEnumerator RebuildNextFrame()
+    {
+        yield return null;
+
+        if (meshGenVertexAuthority != null)
+            meshGenVertexAuthority.RebuildMesh();
+
+        rebuildQueued = false;
+    }
+
+    // =========================================================
+    // STATUS
+    // =========================================================
+
+    public bool IsPipelineReady()
+    {
+        return slamReady && hullReady && meshReady;
+    }
+}
+
+===== END: WorldPipeline_Bootstrap.cs =====
+
+===== BEGIN: RJOAutoWire.cs =====
+using UnityEngine;
+using System.Collections.Generic;
+using System.Text.RegularExpressions;
+
+/// <summary>
+/// Precise autowirer for pre-generated RJO3x3 hierarchies.
+/// Uses naming conventions instead of spatial guessing.
+/// </summary>
+public class RJOAutoWire : MonoBehaviour
+{
+    private RJO3x3 block;
+
+    private void Awake()
+    {
+        block = GetComponent<RJO3x3>();
+        Run();
+    }
+
+    [ContextMenu("AutoWire Now")]
+    public void Run()
+    {
+        if (block == null) return;
+
+        AssignInsiders();
+        AssignVertices();
+        WireVertexHands();
+    }
+
+    // --------------------------------------------------
+    // INSIDERS
+    // --------------------------------------------------
+    void AssignInsiders()
+    {
+        Transform container = transform.Find("InsiderVoxels");
+
+        if (container == null)
+        {
+            Debug.LogWarning("No InsiderVoxels container found.");
+            return;
+        }
+
+        var list = new List<iIix3>();
+
+        foreach (Transform child in container)
+        {
+            var ii = child.GetComponent<iIix3>();
+            if (ii == null) continue;
+
+            ParseInsiderName(child.name, ii);
+            list.Add(ii);
+        }
+
+        block.insiders = list.ToArray();
+    }
+
+    void ParseInsiderName(string name, iIix3 ii)
+    {
+        // Expected: Insider_x_y_z
+        var match = Regex.Match(name, @"(\d+)_(\d+)_(\d+)");
+
+        if (!match.Success) return;
+
+        ii.ix = int.Parse(match.Groups[1].Value);
+        ii.iy = int.Parse(match.Groups[2].Value);
+        ii.iz = int.Parse(match.Groups[3].Value);
+    }
+
+    // --------------------------------------------------
+    // VERTICES
+    // --------------------------------------------------
+    void AssignVertices()
+    {
+        Transform container = transform.Find("CubeCorners");
+
+        if (container == null)
+        {
+            Debug.LogWarning("No CubeCorners container found.");
+            return;
+        }
+
+        Transform[] verts = new Transform[9];
+
+        foreach (Transform child in container)
+        {
+            Vector2Int coord = ParseVertexName(child.name);
+
+            int index = coord.y * 3 + coord.x;
+
+            if (index >= 0 && index < 9)
+                verts[index] = child;
+        }
+
+        block.vertices = verts;
+    }
+
+    Vector2Int ParseVertexName(string name)
+    {
+        // Expected: Corner_x_y_z_* â†’ we only care about x,z
+        var match = Regex.Match(name, @"(\d+)_(\d+)_(\d+)");
+
+        if (!match.Success) return Vector2Int.zero;
+
+        int x = int.Parse(match.Groups[1].Value);
+        int z = int.Parse(match.Groups[3].Value);
+
+        return new Vector2Int(x, z);
+    }
+
+    // --------------------------------------------------
+    // HAND WIRING
+    // --------------------------------------------------
+    void WireVertexHands()
+    {
+        if (block.vertices == null || block.insiders == null)
+            return;
+
+        foreach (var ii in block.insiders)
+        {
+            if (ii == null) continue;
+
+            int index = ii.iz * 3 + ii.ix;
+
+            if (index < 0 || index >= block.vertices.Length)
+                continue;
+
+            Transform v = block.vertices[index];
+
+            ii.vertexHand = v;
+
+            // Move voxel to TOP of its column
+            Vector3 topPos = v.position + Vector3.up * block.verticalStep * (ii.iy + 1);
+
+            ii.transform.position = topPos;
+
+            // Parent to vertex (important for stacking behavior)
+            ii.transform.SetParent(v);
+        }
+    }
+}
+
+===== END: RJOAutoWire.cs =====
+

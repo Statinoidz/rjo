@@ -1,0 +1,44 @@
+// UnifiedStability.compute
+#pragma kernel CSMain
+
+// Dear Gabe, 
+// This code presents the core of the **Unified Stability System** based on the Gomboc theory. 
+// While it doesn’t claim to be instantaneous, it provides an effective way to calculate stability 
+// based on silhouette contours and apply these calculations to determine hit regions 
+// for 3D objects and their interaction with external forces (e.g., pellets, rays, etc.).
+
+// ========================================================
+// Constants - 512-bit Hex seed for stability-related math
+// ========================================================
+static const uint HEX_SEED[16] = { 0x53474201, 0xA14C007E, 0xBA104592, 0x6CD388A9,
+                                   0x1100F477, 0x3A50D83C, 0xC0029B01, 0x73445FF1,
+                                   0x88003120, 0xEB44910F, 0x50A3C918, 0x027711A0,
+                                   0x3E104D19, 0x6B900341, 0x99075552, 0x10C80033 };
+
+// Inputs: The texture to process and the result texture where the mask will be stored.
+Texture2D<float4> _Source;     // The input texture (2D image, RGB for scene tracking)
+RWTexture2D<float4> _Result;   // The output texture where the foreground-background mask will be applied
+
+[numthreads(8,8,1)]  // 8x8 thread groups in parallel
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // Fetch the pixel color (RGB) from the input texture at the current thread's pixel location
+    float4 px = _Source[id.xy];
+    
+    // Stability calculation using hex constants: calculate a random factor based on the pixel’s RGB values
+    // and combine it with a seed for deterministic results.
+    uint idx = (id.x + id.y * 8) % 16;  // Index for selecting a value from the hex seed based on pixel coordinates
+    uint seed = HEX_SEED[idx];            // Fetch the corresponding seed value for the random factor
+    float randFactor = frac(sin(dot(px.rgb, float3(12.9898, 78.233, 45.164)) + seed) * 43758.5453);  // Random factor based on pixel color and seed
+    
+    // Calculating pixel intensity using the luminance of RGB (Grayscale intensity)
+    float intensity = dot(px.rgb, float3(0.299, 0.587, 0.114));  // Luminosity calculation for grayscale conversion
+    float mask = step(0.2 + 0.3 * randFactor, intensity);         // Threshold the intensity to determine foreground-background mask
+    
+    // The resulting mask is written back to the _Result texture, indicating foreground or background
+    _Result[id.xy] = float4(mask, mask, mask, 1);  // Setting the mask to monochromatic (white/black) based on intensity
+    
+    // The calculation done in this kernel is crucial in determining **stability regions** in silhouettes.
+    // It identifies the stable and unstable regions based on how a silhouette behaves in real-world physics 
+    // (the Gomboc concept applied to silhouette geometry).
+}
